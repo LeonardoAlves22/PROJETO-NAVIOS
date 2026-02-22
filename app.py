@@ -25,14 +25,11 @@ def enviar_email_relatorio(conteudo_texto, hora):
         msg['From'] = EMAIL_USER
         msg['To'] = DESTINO
         msg['Subject'] = f"RESUMO OPERACIONAL ({hora}) - {datetime.now().strftime('%d/%m/%Y')}"
-        
         corpo = f"Relatório de acompanhamento de Prospects gerado às {hora}\n"
         corpo += "========================================================\n"
         corpo += conteudo_texto
         corpo += "\n========================================================\n"
-        
         msg.attach(MIMEText(corpo, 'plain'))
-        
         with smtplib.SMTP("smtp.gmail.com", 587) as server:
             server.starttls()
             server.login(EMAIL_USER, EMAIL_PASS)
@@ -48,6 +45,7 @@ def buscar_dados():
         mail.login(EMAIL_USER, EMAIL_PASS)
         mail.select('"[Gmail]/Todo o correio"', readonly=True)
 
+        # 1. Pega a Lista de Navios do e-mail
         _, messages = mail.search(None, '(SUBJECT "LISTA NAVIOS")')
         if not messages[0]: return [], [], [], None
         
@@ -70,26 +68,33 @@ def buscar_dados():
         slz_lista = [limpar_nome(n) for n in partes[0].replace('SLZ:', '').split('\n') if n.strip() and "SLZ:" not in n.upper()]
         bel_lista = [limpar_nome(n) for n in partes[1].split('\n') if n.strip()] if len(partes) > 1 else []
 
-        hoje = (datetime.now() - timedelta(days=1)).strftime("%d-%b-%Y")
-        _, ids = mail.search(None, f'(SINCE "{hoje}")')
+        # --- AJUSTE AQUI: Filtro rigoroso para APENAS HOJE ---
+        agora = datetime.now()
+        hoje_str = agora.strftime("%d-%b-%Y")
+        inicio_do_dia = agora.replace(hour=0, minute=0, second=0, microsecond=0)
+        corte_tarde = agora.replace(hour=14, minute=0, second=0, microsecond=0)
+
+        _, ids = mail.search(None, f'(SINCE "{hoje_str}")')
         
         emails_encontrados = []
-        corte_tarde = datetime.now().replace(hour=14, minute=0, second=0, microsecond=0)
 
-        for e_id in ids[0].split():
-            _, data = mail.fetch(e_id, '(BODY[HEADER.FIELDS (SUBJECT DATE FROM)])')
-            msg = email.message_from_bytes(data[0][1])
-            
-            subject_raw = msg.get("Subject", "")
-            decoded_fragments = decode_header(subject_raw)
-            subj = "".join(str(c.decode(ch or 'utf-8', errors='ignore') if isinstance(c, bytes) else c) for c, ch in decoded_fragments).upper()
+        if ids[0]:
+            for e_id in ids[0].split():
+                _, data = mail.fetch(e_id, '(BODY[HEADER.FIELDS (SUBJECT DATE FROM)])')
+                msg = email.message_from_bytes(data[0][1])
+                
+                # Data de envio do e-mail
+                data_envio = email.utils.parsedate_to_datetime(msg.get("Date"))
+                if data_envio.tzinfo:
+                    data_envio = data_envio.astimezone(None).replace(tzinfo=None)
 
-            de = (msg.get("From") or "").lower()
-            data_envio = email.utils.parsedate_to_datetime(msg.get("Date"))
-            if data_envio.tzinfo:
-                data_envio = data_envio.astimezone(None).replace(tzinfo=None)
-
-            emails_encontrados.append({"subj": subj, "from": de, "date": data_envio})
+                # SÓ consideramos e-mails enviados HOJE (após 00:00)
+                if data_envio >= inicio_do_dia:
+                    subject_raw = msg.get("Subject", "")
+                    decoded_fragments = decode_header(subject_raw)
+                    subj = "".join(str(c.decode(ch or 'utf-8', errors='ignore') if isinstance(c, bytes) else c) for c, ch in decoded_fragments).upper()
+                    de = (msg.get("From") or "").lower()
+                    emails_encontrados.append({"subj": subj, "from": de, "date": data_envio})
 
         mail.logout()
         return slz_lista, bel_lista, emails_encontrados, corte_tarde
@@ -102,15 +107,13 @@ st.set_page_config(page_title="WS Monitor", layout="wide")
 st.title("🚢 Monitor de Prospects - Wilson Sons")
 
 if st.button("🔄 Atualizar, Analisar e Enviar por E-mail"):
-    with st.spinner("Analisando e-mails e organizando relatório..."):
+    with st.spinner("Analisando e-mails de HOJE e organizando relatório..."):
         slz_l, bel_l, e_db, corte = buscar_dados()
         
         if not slz_l and not bel_l:
             st.warning("Nenhuma 'LISTA NAVIOS' encontrada.")
         else:
             h_atual = datetime.now().strftime('%H:%M')
-            
-            # Criamos listas separadas para montar o e-mail depois
             relatorio_manha = "📋 STATUS MANHÃ (GERAL DO DIA)\n"
             relatorio_tarde = "🕒 STATUS TARDE (APÓS AS 14:00)\n"
             
@@ -125,7 +128,7 @@ if st.button("🔄 Atualizar, Analisar e Enviar por E-mail"):
                     resumo_lista = []
                     for n in lista:
                         n_limpo = n
-                        
+                        # Só bate se o remetente for da filial, o nome estiver no assunto e tiver as KEYWORDS
                         match_geral = [em for em in e_db if n_limpo in em["subj"] 
                                        and any(r in em["from"] for r in remetentes)
                                        and any(k in em["subj"] for k in KEYWORDS)]
@@ -140,19 +143,12 @@ if st.button("🔄 Atualizar, Analisar e Enviar por E-mail"):
                             "Geral": status_g,
                             "Pós-14h": status_t
                         })
-                        
-                        # Alimenta as seções do e-mail
                         relatorio_manha += f"{n_limpo}: {status_g}\n"
                         relatorio_tarde += f"{n_limpo}: {status_t}\n"
                     
                     st.dataframe(pd.DataFrame(resumo_lista), use_container_width=True, hide_index=True)
 
-            # Une as partes para o envio do e-mail
             texto_final_email = relatorio_manha + "\n" + "-"*30 + "\n\n" + relatorio_tarde
-            
             sucesso_email = enviar_email_relatorio(texto_final_email, h_atual)
             if sucesso_email:
-                st.success(f"📧 Relatório enviado com sucesso para {DESTINO}!")
-
-st.divider()
-st.info("A parte superior do e-mail conterá o status geral do dia (Manhã) e a parte inferior focará nos envios pós-14h (Tarde).")
+                st.success(f"📧 Relatório de HOJE enviado com sucesso para {DESTINO}!")
