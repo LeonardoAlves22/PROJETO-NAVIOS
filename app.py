@@ -11,7 +11,7 @@ EMAIL_USER, EMAIL_PASS = "alves.leonardo3007@gmail.com", "lewb bwir matt ezco"
 DESTINO = "leonardo.alves@wilsonsons.com.br"
 REM_SLZ = ["operation.sluis@wilsonsons.com.br", "agencybrazil@cargill.com"]
 REM_BEL = ["operation.belem@wilsonsons.com.br"]
-KEYWORDS = ["ARRIVAL", "BERTH", "PROSPECT", "DAILY", "NOTICE"]
+KEYWORDS = ["ARRIVAL NOTICE", "BERTH NOTICE","PROSPECT NOTICE", "BERTHING PROSPECT", "BERTHING PROSPECTS", "BERTH NOTICE", "DAILY NOTICE"]
 
 def limpar_nome(nome_bruto):
     if not nome_bruto: return ""
