@@ -13,28 +13,45 @@ REM_SLZ = ["operation.sluis@wilsonsons.com.br", "agencybrazil@cargill.com"]
 REM_BEL = ["operation.belem@wilsonsons.com.br"]
 KEYWORDS = ["ARRIVAL", "BERTH", "PROSPECT", "DAILY", "NOTICE"]
 
-# Dicionário de Portos para identificar no assunto do e-mail
 PORTOS_IDENTIFICADORES = {
     "SLZ": ["SAO LUIS", "SLZ", "ITAQUI", "ALUMAR", "PONTA DA MADEIRA"],
     "BEL": ["BELEM", "OUTEIRO", "MIRAMAR"],
     "VDC": ["VILA DO CONDE", "VDC", "BARCARENA"]
 }
 
-def limpar_nome_total(nome_bruto):
+# --- FUNÇÃO DE LIMPEZA DEFINITIVA ---
+def limpar_nome_navio(nome_bruto):
     if not nome_bruto: return ""
-    # Remove prefixos
+    # 1. Remove prefixos (MV, M/V, MT)
     nome = re.sub(r'^MV\s+|^M/V\s+|^MT\s+', '', nome_bruto.strip(), flags=re.IGNORECASE)
-    # Remove o que está entre parênteses para a busca limpa (ex: remove (BELEM))
+    # 2. Remove o que estiver entre parênteses (ex: (BELEM))
     nome = re.sub(r'\(.*?\)', '', nome)
-    # Corta em traços ou viagens
+    # 3. Corta em delimitadores de viagem ( - V. , V123, / )
     nome = re.split(r'\s-\s|\sV\.|\sV\d|\sV\s|/|–', nome, flags=re.IGNORECASE)[0]
-    return nome.strip().upper()
+    # 4. Remove números soltos no final e espaços extras
+    return re.sub(r'\s\d+$', '', nome).strip().upper()
 
 def identificar_porto_na_lista(nome_bruto):
-    """Identifica se na sua lista o navio tem (BELEM) ou (VDC) escrito"""
-    if "BELEM" in nome_bruto.upper(): return "BEL"
-    if "VILA DO CONDE" in nome_bruto.upper() or "(VDC)" in nome_bruto.upper(): return "VDC"
+    nome_up = nome_bruto.upper()
+    if "BELEM" in nome_up: return "BEL"
+    if "VILA DO CONDE" in nome_up or "VDC" in nome_up: return "VDC"
     return None
+
+# --- FUNÇÃO DE ENVIO DE E-MAIL (CORREÇÃO DO ERRO) ---
+def enviar_email_relatorio(conteudo_texto, hora):
+    try:
+        msg = MIMEMultipart()
+        msg['From'], msg['To'] = EMAIL_USER, DESTINO
+        msg['Subject'] = f"RESUMO OPERACIONAL POR PORTO ({hora}) - {datetime.now().strftime('%d/%m/%Y')}"
+        msg.attach(MIMEText(conteudo_texto, 'plain'))
+        with smtplib.SMTP("smtp.gmail.com", 587) as server:
+            server.starttls()
+            server.login(EMAIL_USER, EMAIL_PASS)
+            server.send_message(msg)
+        return True
+    except Exception as e:
+        st.error(f"Erro ao enviar e-mail: {e}")
+        return False
 
 def buscar_dados():
     try:
@@ -42,7 +59,6 @@ def buscar_dados():
         mail.login(EMAIL_USER, EMAIL_PASS)
         mail.select('"[Gmail]/Todo o correio"', readonly=True)
 
-        # 1. Pega a Lista de Navios
         _, messages = mail.search(None, '(SUBJECT "LISTA NAVIOS")')
         if not messages[0]: return [], [], [], None
         
@@ -61,15 +77,12 @@ def buscar_dados():
         corpo = re.split(r'Best regards|Regards', corpo, flags=re.IGNORECASE)[0]
         partes = re.split(r'BELEM:', corpo, flags=re.IGNORECASE)
         
-        # Guardamos o nome BRUTO para identificar o porto e o nome LIMPO para a busca
         slz_lista = [n.strip() for n in partes[0].replace('SLZ:', '').split('\n') if n.strip() and "SLZ:" not in n.upper()]
         bel_lista = [n.strip() for n in partes[1].split('\n') if n.strip()] if len(partes) > 1 else []
 
-        # 2. Busca e-mails de HOJE
-        agora = datetime.now()
-        hoje_str = agora.strftime("%d-%b-%Y")
-        inicio_do_dia = agora.replace(hour=0, minute=0, second=0, microsecond=0)
-        corte_tarde = agora.replace(hour=14, minute=0, second=0, microsecond=0)
+        hoje_str = datetime.now().strftime("%d-%b-%Y")
+        inicio_do_dia = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+        corte_tarde = datetime.now().replace(hour=14, minute=0, second=0, microsecond=0)
 
         _, ids = mail.search(None, f'(SINCE "{hoje_str}")')
         emails_encontrados = []
@@ -91,61 +104,56 @@ def buscar_dados():
         mail.logout()
         return slz_lista, bel_lista, emails_encontrados, corte_tarde
     except Exception as e:
-        st.error(f"Erro técnico: {e}")
+        st.error(f"Erro na busca: {e}")
         return [], [], [], None
 
 # --- INTERFACE ---
-st.set_page_config(page_title="WS Monitor Porto", layout="wide")
-st.title("🚢 Monitor de Prospects (SLZ vs BEL vs VDC)")
+st.set_page_config(page_title="WS Monitor", layout="wide")
+st.title("🚢 Monitor Wilson Sons (SLZ / BEL / VDC)")
 
-if st.button("🔄 Analisar e Separar por Porto"):
-    with st.spinner("Analisando e-mails e portos..."):
-        slz_l, bel_l, e_db, corte = buscar_dados()
+if st.button("🔄 Atualizar e Enviar Relatório"):
+    with st.spinner("Analisando e limpando nomes..."):
+        slz_bruto, bel_bruto, e_db, corte = buscar_dados()
         
-        if not slz_l and not bel_l:
+        if not slz_bruto and not bel_bruto:
             st.warning("Lista não encontrada.")
         else:
             h_atual = datetime.now().strftime('%H:%M')
-            texto_email = f"RELATÓRIO POR PORTO - {h_atual}\n"
-            
+            texto_email = f"RELATÓRIO OPERACIONAL - {h_atual}\n"
             col1, col2 = st.columns(2)
             
-            for titulo, lista, rems, coluna in [("SÃO LUÍS", slz_l, REM_SLZ, col1), ("BELÉM / VDC", bel_l, REM_BEL, col2)]:
+            # Processa as duas colunas
+            for t_idx, (titulo, lista_original, rems) in enumerate([("SÃO LUÍS", slz_bruto, REM_SLZ), ("BELÉM / VDC", bel_bruto, REM_BEL)]):
+                col = col1 if t_idx == 0 else col2
                 texto_email += f"\n--- {titulo} ---\n"
-                with coluna:
+                with col:
                     st.header(titulo)
-                    resumo_lista = []
-                    for n_bruto in lista:
-                        n_limpo = limpar_nome_total(n_bruto)
-                        porto_esperado = identificar_porto_na_lista(n_bruto) # BEL ou VDC ou None
+                    dados_tabela = []
+                    for n_bruto in lista_original:
+                        n_limpo = limpar_nome_navio(n_bruto) # AQUI LIMPAMOS O NOME
+                        porto_esp = identificar_porto_na_lista(n_bruto)
                         
-                        # Filtro de Busca Inteligente
                         match_geral = []
                         for em in e_db:
-                            # 1. Bate remetente e nome do navio?
                             if n_limpo in em["subj"] and any(r in em["from"] for r in rems) and any(k in em["subj"] for k in KEYWORDS):
-                                
-                                # 2. Se a lista diz que é BELEM, o assunto tem que ter BELEM. Se diz VDC, assunto tem que ter VDC.
-                                if porto_esperado:
-                                    tags_porto = PORTOS_IDENTIFICADORES[porto_esperado]
-                                    if any(tag in em["subj"] for tag in tags_porto):
+                                if porto_esp:
+                                    if any(tag in em["subj"] for tag in PORTOS_IDENTIFICADORES[porto_esp]):
                                         match_geral.append(em)
                                 else:
-                                    # Se não tem porto especificado na lista, aceita qualquer um daquela filial
                                     match_geral.append(em)
                         
-                        match_tarde = [em for em in match_geral if em["date"] >= corte]
-                        
+                        m_tarde = [em for em in match_geral if em["date"] >= corte]
                         st_g = "✅ OK" if match_geral else "❌ PENDENTE"
-                        st_t = "✅ OK" if match_tarde else "❌ PENDENTE"
+                        st_t = "✅ OK" if m_tarde else "❌ PENDENTE"
                         
-                        resumo_lista.append({"Navio": n_bruto, "Status Geral": st_g, "Tarde": st_t})
-                        texto_email += f"{n_bruto}: {st_g} (Tarde: {st_t})\n"
+                        # Adiciona na tabela com o nome LIMPO
+                        dados_tabela.append({"Navio": n_limpo, "Geral": st_g, "Tarde": st_t})
+                        texto_email += f"{n_limpo}: Geral {st_g} | Tarde {st_t}\n"
                     
-                    st.dataframe(pd.DataFrame(resumo_lista), use_container_width=True, hide_index=True)
+                    st.dataframe(pd.DataFrame(dados_tabela), use_container_width=True, hide_index=True)
 
-            enviar_email_relatorio(texto_email, h_atual)
-            st.success("Relatório processado e enviado!")
+            if enviar_email_relatorio(texto_email, h_atual):
+                st.success("E-mail enviado com sucesso!")
 
 st.divider()
-st.info("Dica: No seu e-mail de lista, use (BELEM) ou (VILA DO CONDE) para navios que frequentam os dois portos.")
+st.info("O sistema agora remove automaticamente 'MV' e números de viagem do relatório final.")
