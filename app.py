@@ -9,7 +9,6 @@ from email.header import decode_header
 # --- CONFIGURAÇÕES ---
 EMAIL_USER, EMAIL_PASS = "alves.leonardo3007@gmail.com", "lewb bwir matt ezco"
 DESTINO = "leonardo.alves@wilsonsons.com.br"
-# Remetentes em listas para facilitar a busca
 REM_SLZ = ["operation.sluis@wilsonsons.com.br", "agencybrazil@cargill.com"]
 REM_BEL = ["operation.belem@wilsonsons.com.br"]
 KEYWORDS = ["ARRIVAL", "BERTH", "PROSPECT", "DAILY", "NOTICE"]
@@ -21,14 +20,17 @@ def limpar_nome(nome_bruto):
     return nome.strip().upper()
 
 def enviar_email_relatorio(conteudo_texto, hora):
-    """Envia o resumo processado para o seu e-mail Wilson Sons"""
     try:
         msg = MIMEMultipart()
         msg['From'] = EMAIL_USER
         msg['To'] = DESTINO
         msg['Subject'] = f"RESUMO OPERACIONAL ({hora}) - {datetime.now().strftime('%d/%m/%Y')}"
         
-        corpo = f"Relatório gerado via Web App às {hora}\n\n{conteudo_texto}"
+        corpo = f"Relatório de acompanhamento de Prospects gerado às {hora}\n"
+        corpo += "========================================================\n"
+        corpo += conteudo_texto
+        corpo += "\n========================================================\n"
+        
         msg.attach(MIMEText(corpo, 'plain'))
         
         with smtplib.SMTP("smtp.gmail.com", 587) as server:
@@ -46,7 +48,6 @@ def buscar_dados():
         mail.login(EMAIL_USER, EMAIL_PASS)
         mail.select('"[Gmail]/Todo o correio"', readonly=True)
 
-        # 1. Pega a Lista de Navios do e-mail
         _, messages = mail.search(None, '(SUBJECT "LISTA NAVIOS")')
         if not messages[0]: return [], [], [], None
         
@@ -69,7 +70,6 @@ def buscar_dados():
         slz_lista = [limpar_nome(n) for n in partes[0].replace('SLZ:', '').split('\n') if n.strip() and "SLZ:" not in n.upper()]
         bel_lista = [limpar_nome(n) for n in partes[1].split('\n') if n.strip()] if len(partes) > 1 else []
 
-        # 2. Busca Prospects (Últimas 24h)
         hoje = (datetime.now() - timedelta(days=1)).strftime("%d-%b-%Y")
         _, ids = mail.search(None, f'(SINCE "{hoje}")')
         
@@ -102,24 +102,29 @@ st.set_page_config(page_title="WS Monitor", layout="wide")
 st.title("🚢 Monitor de Prospects - Wilson Sons")
 
 if st.button("🔄 Atualizar, Analisar e Enviar por E-mail"):
-    with st.spinner("Processando e-mails e preparando envio..."):
+    with st.spinner("Analisando e-mails e organizando relatório..."):
         slz_l, bel_l, e_db, corte = buscar_dados()
         
         if not slz_l and not bel_l:
             st.warning("Nenhuma 'LISTA NAVIOS' encontrada.")
         else:
             h_atual = datetime.now().strftime('%H:%M')
-            texto_relatorio = ""
+            
+            # Criamos listas separadas para montar o e-mail depois
+            relatorio_manha = "📋 STATUS MANHÃ (GERAL DO DIA)\n"
+            relatorio_tarde = "🕒 STATUS TARDE (APÓS AS 14:00)\n"
             
             col1, col2 = st.columns(2)
             
             for titulo, lista, remetentes, coluna in [("SÃO LUÍS", slz_l, REM_SLZ, col1), ("BELÉM", bel_l, REM_BEL, col2)]:
-                texto_relatorio += f"\n--- {titulo} ---\n"
+                relatorio_manha += f"\n[{titulo}]\n"
+                relatorio_tarde += f"\n[{titulo}]\n"
+                
                 with coluna:
                     st.header(titulo)
                     resumo_lista = []
                     for n in lista:
-                        n_limpo = n # Já vem limpo da função de busca
+                        n_limpo = n
                         
                         match_geral = [em for em in e_db if n_limpo in em["subj"] 
                                        and any(r in em["from"] for r in remetentes)
@@ -135,14 +140,19 @@ if st.button("🔄 Atualizar, Analisar e Enviar por E-mail"):
                             "Geral": status_g,
                             "Pós-14h": status_t
                         })
-                        texto_relatorio += f"{n_limpo}: Geral {status_g} | Tarde {status_t}\n"
+                        
+                        # Alimenta as seções do e-mail
+                        relatorio_manha += f"{n_limpo}: {status_g}\n"
+                        relatorio_tarde += f"{n_limpo}: {status_t}\n"
                     
                     st.dataframe(pd.DataFrame(resumo_lista), use_container_width=True, hide_index=True)
 
-            # --- DISPARO DO E-MAIL ---
-            sucesso_email = enviar_email_relatorio(texto_relatorio, h_atual)
+            # Une as partes para o envio do e-mail
+            texto_final_email = relatorio_manha + "\n" + "-"*30 + "\n\n" + relatorio_tarde
+            
+            sucesso_email = enviar_email_relatorio(texto_final_email, h_atual)
             if sucesso_email:
-                st.success(f"📧 Relatório enviado com sucesso para {DESTINO} às {h_atual}!")
+                st.success(f"📧 Relatório enviado com sucesso para {DESTINO}!")
 
 st.divider()
-st.info("O sistema analisa os e-mails e envia automaticamente o resumo para o seu e-mail Wilson Sons.")
+st.info("A parte superior do e-mail conterá o status geral do dia (Manhã) e a parte inferior focará nos envios pós-14h (Tarde).")
