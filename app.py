@@ -140,7 +140,7 @@ if st.button("🔄 Atualizar, Analisar e Enviar por E-mail"):
                         
                         resumo_lista.append({
                             "Navio": n_limpo,
-                            "Geral": status_g,
+                            "Manhã": status_g,
                             "Pós-14h": status_t
                         })
                         relatorio_manha += f"{n_limpo}: {status_g}\n"
