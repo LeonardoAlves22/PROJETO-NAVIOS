@@ -16,11 +16,29 @@ KEYWORDS = ["ARRIVAL", "BERTH", "PROSPECT", "DAILY", "NOTICE"]
 
 def limpar_nome(nome_bruto):
     if not nome_bruto: return ""
-    # Remove prefixos comuns
     nome = re.sub(r'^MV\s+|^M/V\s+|^MT\s+', '', nome_bruto.strip(), flags=re.IGNORECASE)
-    # Corta em traços, pontos de viagem ou barras
     nome = re.split(r'\s-\s|\sV\.|\sV\d|\sV\s|/|–', nome, flags=re.IGNORECASE)[0]
     return nome.strip().upper()
+
+def enviar_email_relatorio(conteudo_texto, hora):
+    """Envia o resumo processado para o seu e-mail Wilson Sons"""
+    try:
+        msg = MIMEMultipart()
+        msg['From'] = EMAIL_USER
+        msg['To'] = DESTINO
+        msg['Subject'] = f"RESUMO OPERACIONAL ({hora}) - {datetime.now().strftime('%d/%m/%Y')}"
+        
+        corpo = f"Relatório gerado via Web App às {hora}\n\n{conteudo_texto}"
+        msg.attach(MIMEText(corpo, 'plain'))
+        
+        with smtplib.SMTP("smtp.gmail.com", 587) as server:
+            server.starttls()
+            server.login(EMAIL_USER, EMAIL_PASS)
+            server.send_message(msg)
+        return True
+    except Exception as e:
+        st.error(f"Erro ao disparar e-mail: {e}")
+        return False
 
 def buscar_dados():
     try:
@@ -30,13 +48,12 @@ def buscar_dados():
 
         # 1. Pega a Lista de Navios do e-mail
         _, messages = mail.search(None, '(SUBJECT "LISTA NAVIOS")')
-        if not messages[0]: return [], [], [], [], None
+        if not messages[0]: return [], [], [], None
         
         ultimo_id = messages[0].split()[-1]
         _, data = mail.fetch(ultimo_id, '(RFC822)')
         msg_raw = email.message_from_bytes(data[0][1])
         
-        # Extração do corpo do e-mail de lista
         corpo = ""
         if msg_raw.is_multipart():
             for part in msg_raw.walk():
@@ -52,33 +69,23 @@ def buscar_dados():
         slz_lista = [limpar_nome(n) for n in partes[0].replace('SLZ:', '').split('\n') if n.strip() and "SLZ:" not in n.upper()]
         bel_lista = [limpar_nome(n) for n in partes[1].split('\n') if n.strip()] if len(partes) > 1 else []
 
-        # 2. Busca Prospects (Pegamos desde ontem para evitar erros de fuso horário)
+        # 2. Busca Prospects (Últimas 24h)
         hoje = (datetime.now() - timedelta(days=1)).strftime("%d-%b-%Y")
         _, ids = mail.search(None, f'(SINCE "{hoje}")')
         
         emails_encontrados = []
-        # Definindo corte das 14h no horário local
         corte_tarde = datetime.now().replace(hour=14, minute=0, second=0, microsecond=0)
 
         for e_id in ids[0].split():
             _, data = mail.fetch(e_id, '(BODY[HEADER.FIELDS (SUBJECT DATE FROM)])')
             msg = email.message_from_bytes(data[0][1])
             
-            # Decodificação robusta do Assunto
             subject_raw = msg.get("Subject", "")
             decoded_fragments = decode_header(subject_raw)
-            subj = ""
-            for content, charset in decoded_fragments:
-                if isinstance(content, bytes):
-                    subj += content.decode(charset or 'utf-8', errors='ignore')
-                else:
-                    subj += str(content)
-            subj = subj.upper()
+            subj = "".join(str(c.decode(ch or 'utf-8', errors='ignore') if isinstance(c, bytes) else c) for c, ch in decoded_fragments).upper()
 
-            # De e Data
             de = (msg.get("From") or "").lower()
             data_envio = email.utils.parsedate_to_datetime(msg.get("Date"))
-            # Converter para offset-naive (sem fuso) para comparar com datetime.now()
             if data_envio.tzinfo:
                 data_envio = data_envio.astimezone(None).replace(tzinfo=None)
 
@@ -87,46 +94,55 @@ def buscar_dados():
         mail.logout()
         return slz_lista, bel_lista, emails_encontrados, corte_tarde
     except Exception as e:
-        st.error(f"Erro técnico: {e}")
+        st.error(f"Erro técnico na busca: {e}")
         return [], [], [], None
 
 # --- INTERFACE ---
 st.set_page_config(page_title="WS Monitor", layout="wide")
 st.title("🚢 Monitor de Prospects - Wilson Sons")
 
-if st.button("🔄 Atualizar e Analisar Agora"):
-    with st.spinner("Lendo e-mails..."):
+if st.button("🔄 Atualizar, Analisar e Enviar por E-mail"):
+    with st.spinner("Processando e-mails e preparando envio..."):
         slz_l, bel_l, e_db, corte = buscar_dados()
         
         if not slz_l and not bel_l:
-            st.warning("Nenhuma 'LISTA NAVIOS' encontrada no e-mail.")
+            st.warning("Nenhuma 'LISTA NAVIOS' encontrada.")
         else:
-            st.success(f"Analisados {len(e_db)} e-mails das últimas 24h.")
+            h_atual = datetime.now().strftime('%H:%M')
+            texto_relatorio = ""
             
             col1, col2 = st.columns(2)
             
             for titulo, lista, remetentes, coluna in [("SÃO LUÍS", slz_l, REM_SLZ, col1), ("BELÉM", bel_l, REM_BEL, col2)]:
+                texto_relatorio += f"\n--- {titulo} ---\n"
                 with coluna:
                     st.header(titulo)
                     resumo_lista = []
                     for n in lista:
-                        n_limpo = limpar_nome(n)
+                        n_limpo = n # Já vem limpo da função de busca
                         
-                        # Filtra e-mails que batem com o navio, remetente e keywords
                         match_geral = [em for em in e_db if n_limpo in em["subj"] 
                                        and any(r in em["from"] for r in remetentes)
                                        and any(k in em["subj"] for k in KEYWORDS)]
                         
-                        # Checagem Tarde (pós 14h)
                         match_tarde = [em for em in match_geral if em["date"] >= corte]
+                        
+                        status_g = "✅ OK" if match_geral else "❌ PENDENTE"
+                        status_t = "✅ OK" if match_tarde else "❌ PENDENTE"
                         
                         resumo_lista.append({
                             "Navio": n_limpo,
-                            "Manhã/Geral": "✅ OK" if match_geral else "❌ PENDENTE",
-                            "Tarde (pós-14h)": "✅ OK" if match_tarde else "❌ PENDENTE"
+                            "Geral": status_g,
+                            "Pós-14h": status_t
                         })
+                        texto_relatorio += f"{n_limpo}: Geral {status_g} | Tarde {status_t}\n"
                     
                     st.dataframe(pd.DataFrame(resumo_lista), use_container_width=True, hide_index=True)
 
+            # --- DISPARO DO E-MAIL ---
+            sucesso_email = enviar_email_relatorio(texto_relatorio, h_atual)
+            if sucesso_email:
+                st.success(f"📧 Relatório enviado com sucesso para {DESTINO} às {h_atual}!")
+
 st.divider()
-st.info("O sistema busca e-mails enviados pelos endereços oficiais da Wilson Sons e Cargill. Certifique-se que o nome do navio no assunto do e-mail é o mesmo da sua lista.")
+st.info("O sistema analisa os e-mails e envia automaticamente o resumo para o seu e-mail Wilson Sons.")
