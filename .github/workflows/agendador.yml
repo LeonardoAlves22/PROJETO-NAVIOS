@@ -1,0 +1,28 @@
+name: Relatorio Automatico Navios
+
+on:
+  schedule:
+    # 09h30, 10h00, 11h00 BRT -> 12h30, 13h00, 14h00 UTC
+    - cron: '30 12 * * *'
+    - cron: '0 13 * * *'
+    - cron: '0 14 * * *'
+    # 16h00, 17h00, 17h30 BRT -> 19h00, 20h00, 20h30 UTC
+    - cron: '0 19 * * *'
+    - cron: '0 20 * * *'
+    - cron: '30 20 * * *'
+  workflow_dispatch: # Permite rodar manualmente clicando num botão
+
+jobs:
+  run-monitor:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout codigo
+        uses: actions/checkout@v3
+
+      - name: Configurar Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+
+      - name: Rodar Motor de Busca
+        run: python motor.py
