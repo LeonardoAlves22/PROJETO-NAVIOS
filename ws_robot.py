@@ -63,7 +63,6 @@ def extrair_checklist_ws(ws_user, ws_pass, g_user, g_pass, navio_alvo):
                 driver.execute_script("arguments[0].click();", btn_confirmar)
                 time.sleep(5)
             
-            # Retorno simulado para teste de conexão
             return {
                 "Pre-arrival": "✅ FEITO",
                 "Arrival": "❌ PENDENTE",
@@ -72,7 +71,6 @@ def extrair_checklist_ws(ws_user, ws_pass, g_user, g_pass, navio_alvo):
             }
         else:
             return {"Erro": "Campos de login não encontrados"}
-
     except Exception as e:
         return {"Erro": str(e)}
     finally:
