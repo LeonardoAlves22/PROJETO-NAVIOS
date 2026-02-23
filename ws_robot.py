@@ -1,32 +1,26 @@
 import time
 import re
 import imaplib
-import email
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
-from email.header import decode_header
 
 def buscar_codigo_mfa(user, password):
     try:
-        time.sleep(15) 
+        time.sleep(12) 
         mail = imaplib.IMAP4_SSL("imap.gmail.com")
         mail.login(user, password)
         mail.select('"[Gmail]/Todo o correio"')
         _, data = mail.search(None, '(SUBJECT "verificacao")')
+        if not data[0]: return None
         ids = data[0].split()
-        if not ids: return None
         _, data = mail.fetch(ids[-1], '(RFC822)')
-        raw_email = data[0][1].decode('utf-8', errors='ignore')
-        codigo = re.search(r'\b\d{6}\b', raw_email)
+        raw = data[0][1].decode('utf-8', errors='ignore')
+        codigo = re.search(r'\b\d{6}\b', raw)
         return codigo.group(0) if codigo else None
-    except:
-        return None
-    finally:
-        try: mail.logout()
-        except: pass
+    except: return None
 
 def configurar_driver():
     options = Options()
@@ -38,54 +32,43 @@ def configurar_driver():
 
 def extrair_checklist_ws(ws_user, ws_pass, g_user, g_pass, navio_alvo):
     driver = configurar_driver()
-    wait = WebDriverWait(driver, 40)
-    
+    wait = WebDriverWait(driver, 35)
     try:
         driver.get("https://wsvisitador.wilsonsons.com.br/")
-        time.sleep(8)
+        time.sleep(6)
         
         # Login
-        inputs = wait.until(EC.presence_of_all_elements_located((By.CSS_SELECTOR, "input.mantine-Input-input")))
-        if len(inputs) >= 2:
-            inputs[0].send_keys(ws_user)
-            inputs[1].send_keys(ws_pass)
-            btn_entrar = driver.find_element(By.XPATH, "//button[contains(., 'Entrar')]")
-            driver.execute_script("arguments[0].click();", btn_entrar)
-            
-            # MFA
-            codigo = buscar_codigo_mfa(g_user, g_pass)
-            if codigo:
-                campo_mfa = wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, "input.mantine-Input-input")))
-                campo_mfa.send_keys(codigo)
-                btn_confirmar = driver.find_element(By.XPATH, "//button")
-                driver.execute_script("arguments[0].click();", btn_confirmar)
-                time.sleep(8)
+        inputs = wait.until(EC.presence_of_all_elements_located((By.TAG_NAME, "input")))
+        inputs[0].send_keys(ws_user)
+        inputs[1].send_keys(ws_pass)
+        btn = driver.find_element(By.XPATH, "//button[contains(., 'Entrar')]")
+        driver.execute_script("arguments[0].click();", btn)
+        
+        # MFA
+        codigo = buscar_codigo_mfa(g_user, g_pass)
+        if codigo:
+            campo = wait.until(EC.presence_of_element_located((By.TAG_NAME, "input")))
+            campo.send_keys(codigo)
+            btn_c = driver.find_element(By.XPATH, "//button")
+            driver.execute_script("arguments[0].click();", btn_c)
+            time.sleep(6)
 
-            # BUSCA DO NAVIO NO DASHBOARD
-            # Tenta clicar no elemento que contém o nome do navio
-            xpath_navio = f"//*[contains(text(), '{navio_alvo}')]"
-            link_navio = wait.until(EC.element_to_be_clickable((By.XPATH, xpath_navio)))
-            driver.execute_script("arguments[0].click();", link_navio)
-            time.sleep(5)
+        # Busca do Navio
+        # Tenta localizar o nome do navio na lista
+        xpath_n = f"//*[contains(text(), '{navio_alvo}')]"
+        link = wait.until(EC.element_to_be_clickable((By.XPATH, xpath_n)))
+        driver.execute_script("arguments[0].click();", link)
+        time.sleep(4)
 
-            # EXTRAÇÃO DAS ETAPAS
-            resultado = {}
-            etapas_alvo = ["Pre-arrival", "Arrival", "Berthing", "Unberthing"]
-            for etapa in etapas_alvo:
-                try:
-                    # Busca o texto da etapa e verifica se o elemento pai indica conclusão
-                    # Ajuste de lógica: procura ícones de check ou classes de sucesso
-                    el = driver.find_element(By.XPATH, f"//*[contains(text(), '{etapa}')]/parent::*")
-                    if "✅" in el.text or "concluido" in el.get_attribute("class").lower():
-                        resultado[etapa] = "✅ OK"
-                    else:
-                        resultado[etapa] = "❌ PEND"
-                except:
-                    resultado[etapa] = "N/D"
-            
-            return resultado
-        return {"Erro": "Campos de login não encontrados"}
+        # Leitura das etapas
+        res = {}
+        for etapa in ["Pre-arrival", "Arrival", "Berthing", "Unberthing"]:
+            try:
+                el = driver.find_element(By.XPATH, f"//*[contains(text(), '{etapa}')]/parent::*")
+                res[etapa] = "✅ OK" if ("✅" in el.text or "concluido" in el.get_attribute("class").lower()) else "❌ PEND"
+            except: res[etapa] = "N/D"
+        return res
     except Exception as e:
-        return {"Erro": str(e)}
+        return {"Erro": f"Não localizado"}
     finally:
         driver.quit()
