@@ -39,22 +39,17 @@ def configurar_driver():
 def extrair_checklist_ws(ws_user, ws_pass, g_user, g_pass, navio_alvo):
     driver = configurar_driver()
     wait = WebDriverWait(driver, 30)
-    
     try:
         driver.get("https://wsvisitador.wilsonsons.com.br/")
         time.sleep(5)
-        
-        # Localiza campos de login
+        # Tenta localizar campos de login pela classe Mantine
         inputs = wait.until(EC.presence_of_all_elements_located((By.CSS_SELECTOR, "input.mantine-Input-input")))
-        
         if len(inputs) >= 2:
             inputs[0].send_keys(ws_user)
             inputs[1].send_keys(ws_pass)
-            
             btn_entrar = wait.until(EC.element_to_be_clickable((By.XPATH, "//button[contains(., 'Entrar')]")))
             driver.execute_script("arguments[0].click();", btn_entrar)
             
-            # MFA
             codigo = buscar_codigo_mfa(g_user, g_pass)
             if codigo:
                 campo_mfa = wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, "input.mantine-Input-input")))
@@ -63,14 +58,8 @@ def extrair_checklist_ws(ws_user, ws_pass, g_user, g_pass, navio_alvo):
                 driver.execute_script("arguments[0].click();", btn_confirmar)
                 time.sleep(5)
             
-            return {
-                "Pre-arrival": "✅ FEITO",
-                "Arrival": "❌ PENDENTE",
-                "Berthing": "❌ PENDENTE",
-                "Unberthing": "❌ PENDENTE"
-            }
-        else:
-            return {"Erro": "Campos de login não encontrados"}
+            return {"Pre-arrival": "✅ FEITO", "Arrival": "❌ PENDENTE", "Berthing": "❌ PENDENTE", "Unberthing": "❌ PENDENTE"}
+        return {"Erro": "Campos não encontrados"}
     except Exception as e:
         return {"Erro": str(e)}
     finally:
