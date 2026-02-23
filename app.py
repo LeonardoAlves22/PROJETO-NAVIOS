@@ -96,7 +96,6 @@ if st.button("🔄 Atualizar e Enviar Relatório"):
         if slz_bruto or bel_bruto:
             h_atual = datetime.now().strftime('%H:%M')
             res_slz, res_bel = [], []
-
             for titulo, lista, rems, target_list in [("SLZ", slz_bruto, REM_SLZ, res_slz), ("BEL/VDC", bel_bruto, REM_BEL, res_bel)]:
                 for n_bruto in lista:
                     n_limpo = limpar_nome_navio(n_bruto)
@@ -105,19 +104,12 @@ if st.button("🔄 Atualizar e Enviar Relatório"):
                     if p_esp: m_g = [em for em in m_g if any(tag in em["subj"] for tag in PORTOS_IDENTIFICADORES[p_esp])]
                     m_t = [em for em in m_g if em["date"] >= corte]
                     target_list.append({"navio": n_limpo, "manha": "✅" if m_g else "❌", "tarde": "✅" if m_t else "❌"})
-
             col1, col2 = st.columns(2)
             with col1: st.subheader("SÃO LUÍS"); st.table(pd.DataFrame(res_slz))
             with col2: st.subheader("BELÉM / VDC"); st.table(pd.DataFrame(res_bel))
+            st.success("Tabelas atualizadas!")
 
-            # --- GERAÇÃO HTML COMPACTO ---
-            html_final = f"<h2>Resumo Operacional - {h_atual}</h2>"
-            # (Adicione aqui a lógica de montar_tabela que discutimos antes se desejar)
-            
-            if enviar_email_html(html_final, h_atual):
-                st.success("Relatório enviado!")
-
-# --- PARTE DO ROBÔ DE CHECKLIST ---
+# --- PARTE DO ROBÔ ---
 st.sidebar.divider()
 st.sidebar.subheader("🔒 Acesso Visitador")
 ws_user = st.sidebar.text_input("Usuário WS")
@@ -131,7 +123,6 @@ if st.button("🚀 Sincronizar Checklist em Tempo Real"):
             from ws_robot import extrair_checklist_ws
             with st.spinner("Acessando sistema Visitador..."):
                 status_checklist = extrair_checklist_ws(ws_user, ws_pass, EMAIL_USER, EMAIL_PASS, "GERAL")
-                
                 if "Erro" in status_checklist:
                     st.error(f"Erro no Robô: {status_checklist['Erro']}")
                 else:
