@@ -35,11 +35,29 @@ def extrair_checklist_ws(ws_user, ws_pass, g_user, g_pass, navio_alvo):
         wait = WebDriverWait(driver, 25)
         driver.get("https://wsvisitador.wilsonsons.com.br/")
         
-        # Login
-        inputs = wait.until(EC.presence_of_all_elements_located((By.CSS_SELECTOR, "input.mantine-Input-input")))
+        # --- NOVO BLOCO DE LOGIN NO WS_ROBOT.PY ---
+try:
+    driver.get("https://wsvisitador.wilsonsons.com.br/")
+    
+    # Aguarda o corpo da página carregar completamente
+    wait.until(EC.presence_of_element_located((By.TAG_NAME, "body")))
+    time.sleep(5) # Pausa estratégica para renderização
+
+    # Busca os campos pelo atributo 'placeholder' em vez da classe CSS
+    user_field = wait.until(EC.element_to_be_clickable((By.CSS_SELECTOR, "input[placeholder*='Digite']")))
+    
+    # Em vez de inputs[0], buscamos especificamente o campo de senha que vem depois
+    inputs = driver.find_elements(By.CSS_SELECTOR, "input.mantine-Input-input")
+    
+    if len(inputs) >= 2:
         inputs[0].send_keys(ws_user)
         inputs[1].send_keys(ws_pass)
-        driver.find_element(By.XPATH, "//button[contains(., 'Entrar')]").click()
+        
+        # Clica no botão usando o texto exato
+        btn = driver.find_element(By.XPATH, "//button[//span[text()='Entrar'] or contains(., 'Entrar')]")
+        driver.execute_script("arguments[0].click();", btn) # Clique via Javascript é mais garantido
+    else:
+        raise Exception("Campos de login não encontrados na página.")
         
         # MFA
         codigo = buscar_codigo_mfa(g_user, g_pass)
