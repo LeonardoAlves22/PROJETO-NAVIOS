@@ -34,56 +34,58 @@ def configurar_driver():
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")
     options.add_argument("--window-size=1920,1080")
-    # User-agent para o site não achar que é um robô básico
-    options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36")
     return webdriver.Chrome(options=options)
 
 def extrair_checklist_ws(ws_user, ws_pass, g_user, g_pass, navio_alvo):
     driver = configurar_driver()
-    # Espera de até 40 segundos para o site carregar
     wait = WebDriverWait(driver, 40)
     
     try:
         driver.get("https://wsvisitador.wilsonsons.com.br/")
+        time.sleep(8)
         
-        # Pausa forçada de 10 segundos para garantir que o formulário apareça
-        time.sleep(10)
-        
-        # Tenta localizar QUALQUER campo de input que apareça na tela
-        inputs = wait.until(EC.presence_of_all_elements_located((By.TAG_NAME, "input")))
-        
+        # Login
+        inputs = wait.until(EC.presence_of_all_elements_located((By.CSS_SELECTOR, "input.mantine-Input-input")))
         if len(inputs) >= 2:
-            # Preenche Usuário e Senha
             inputs[0].send_keys(ws_user)
             inputs[1].send_keys(ws_pass)
+            btn_entrar = driver.find_element(By.XPATH, "//button[contains(., 'Entrar')]")
+            driver.execute_script("arguments[0].click();", btn_entrar)
             
-            # Clica no botão 'Entrar' (procura pelo texto dentro dele)
-            botao = driver.find_element(By.XPATH, "//button[contains(., 'Entrar')]")
-            driver.execute_script("arguments[0].click();", botao)
-            
-            # Aguarda o sistema pedir o MFA
-            time.sleep(10)
+            # MFA
             codigo = buscar_codigo_mfa(g_user, g_pass)
-            
             if codigo:
-                # O campo de código costuma ser o único input visível agora
-                campo_mfa = wait.until(EC.presence_of_element_located((By.TAG_NAME, "input")))
+                campo_mfa = wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, "input.mantine-Input-input")))
                 campo_mfa.send_keys(codigo)
-                btn_mfa = driver.find_element(By.XPATH, "//button")
-                driver.execute_script("arguments[0].click();", btn_mfa)
-                time.sleep(5)
-            
-            return {
-                "Pre-arrival": "✅ CONCLUÍDO",
-                "Arrival": "❌ PENDENTE",
-                "Berthing": "❌ PENDENTE",
-                "Unberthing": "❌ PENDENTE"
-            }
-        else:
-            return {"Erro": "O formulário de login não carregou a tempo."}
+                btn_confirmar = driver.find_element(By.XPATH, "//button")
+                driver.execute_script("arguments[0].click();", btn_confirmar)
+                time.sleep(8)
 
+            # BUSCA DO NAVIO NO DASHBOARD
+            # Tenta clicar no elemento que contém o nome do navio
+            xpath_navio = f"//*[contains(text(), '{navio_alvo}')]"
+            link_navio = wait.until(EC.element_to_be_clickable((By.XPATH, xpath_navio)))
+            driver.execute_script("arguments[0].click();", link_navio)
+            time.sleep(5)
+
+            # EXTRAÇÃO DAS ETAPAS
+            resultado = {}
+            etapas_alvo = ["Pre-arrival", "Arrival", "Berthing", "Unberthing"]
+            for etapa in etapas_alvo:
+                try:
+                    # Busca o texto da etapa e verifica se o elemento pai indica conclusão
+                    # Ajuste de lógica: procura ícones de check ou classes de sucesso
+                    el = driver.find_element(By.XPATH, f"//*[contains(text(), '{etapa}')]/parent::*")
+                    if "✅" in el.text or "concluido" in el.get_attribute("class").lower():
+                        resultado[etapa] = "✅ OK"
+                    else:
+                        resultado[etapa] = "❌ PEND"
+                except:
+                    resultado[etapa] = "N/D"
+            
+            return resultado
+        return {"Erro": "Campos de login não encontrados"}
     except Exception as e:
-        # Se der erro, retorna a mensagem exata para aparecer no Streamlit
-        return {"Erro": f"Falha na automação: {str(e)}"}
+        return {"Erro": str(e)}
     finally:
         driver.quit()
