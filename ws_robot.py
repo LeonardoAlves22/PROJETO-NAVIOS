@@ -34,7 +34,6 @@ def configurar_driver():
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")
     options.add_argument("--window-size=1920,1080")
-    options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36")
     return webdriver.Chrome(options=options)
 
 def extrair_checklist_ws(ws_user, ws_pass, g_user, g_pass, navio_alvo):
@@ -43,9 +42,9 @@ def extrair_checklist_ws(ws_user, ws_pass, g_user, g_pass, navio_alvo):
     
     try:
         driver.get("https://wsvisitador.wilsonsons.com.br/")
-        time.sleep(5) # Aguarda renderização inicial
+        time.sleep(5)
         
-        # Localiza os campos de login
+        # Localiza campos de login
         inputs = wait.until(EC.presence_of_all_elements_located((By.CSS_SELECTOR, "input.mantine-Input-input")))
         
         if len(inputs) >= 2:
@@ -54,25 +53,25 @@ def extrair_checklist_ws(ws_user, ws_pass, g_user, g_pass, navio_alvo):
             
             btn_entrar = wait.until(EC.element_to_be_clickable((By.XPATH, "//button[contains(., 'Entrar')]")))
             driver.execute_script("arguments[0].click();", btn_entrar)
-        else:
-            raise Exception("Campos de login não encontrados.")
-
-        # MFA
-        codigo = buscar_codigo_mfa(g_user, g_pass)
-        if codigo:
-            campo_mfa = wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, "input.mantine-Input-input")))
-            campo_mfa.send_keys(codigo)
-            btn_confirmar = driver.find_element(By.XPATH, "//button")
-            driver.execute_script("arguments[0].click();", btn_confirmar)
-            time.sleep(5)
             
-        # Simulação de Extração (Enquanto ajustamos a navegação interna)
-        return {
-            "Pre-arrival": "✅ FEITO",
-            "Arrival": "❌ PENDENTE",
-            "Berthing": "❌ PENDENTE",
-            "Unberthing": "❌ PENDENTE"
-        }
+            # MFA
+            codigo = buscar_codigo_mfa(g_user, g_pass)
+            if codigo:
+                campo_mfa = wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, "input.mantine-Input-input")))
+                campo_mfa.send_keys(codigo)
+                btn_confirmar = driver.find_element(By.XPATH, "//button")
+                driver.execute_script("arguments[0].click();", btn_confirmar)
+                time.sleep(5)
+            
+            # Retorno simulado para teste de conexão
+            return {
+                "Pre-arrival": "✅ FEITO",
+                "Arrival": "❌ PENDENTE",
+                "Berthing": "❌ PENDENTE",
+                "Unberthing": "❌ PENDENTE"
+            }
+        else:
+            return {"Erro": "Campos de login não encontrados"}
 
     except Exception as e:
         return {"Erro": str(e)}
