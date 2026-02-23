@@ -136,3 +136,28 @@ if st.button("🔄 Atualizar e Enviar Relatório Compacto"):
             
             if enviar_email_html(html_final, h_atual):
                 st.success("Relatório compactado enviado!")
+
+
+import streamlit as st
+from ws_robot import extrair_checklist_ws
+
+# Na barra lateral ou em um formulário
+st.sidebar.subheader("🔒 Acesso Visitador")
+ws_user = st.sidebar.text_input("Usuário WS")
+ws_pass = st.sidebar.text_input("Senha WS", type="password")
+
+if st.button("🚀 Sincronizar Checklist em Tempo Real"):
+    if not ws_user or not ws_pass:
+        st.warning("Preencha as credenciais do Visitador na lateral.")
+    else:
+        with st.spinner("O Robô está acessando o sistema... Isso leva cerca de 40 segundos."):
+            # Chama o robô (exemplo para o primeiro navio da sua lista)
+            status_checklist = extrair_checklist_ws(ws_user, ws_pass, EMAIL_USER, EMAIL_PASS, "SILVERGATE")
+            
+            if status_checklist:
+                st.subheader("📊 Status do Checklist Operacional")
+                cols = st.columns(4)
+                for i, (etapa, status) in enumerate(status_checklist.items()):
+                    cor = "green" if status == "FEITO" else "red"
+                    cols[i].metric(label=etapa, value=status, delta=None)
+                    cols[i].markdown(f"**:{cor}[{status}]**")
