@@ -3,7 +3,7 @@ import imaplib, email, re, smtplib
 import pandas as pd
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
-from datetime import datetime, timedelta  # Adicionado timedelta para o ajuste de hora
+from datetime import datetime, timedelta
 from email.header import decode_header
 import time
 
@@ -20,7 +20,25 @@ PORTOS_IDENTIFICADORES = {
     "VDC": ["VILA DO CONDE", "VDC", "BARCARENA"]
 }
 
-# --- FUNÇÕES DO RELATÓRIO ORIGINAL (PROSPECT/NOTICE) ---
+# --- FUNÇÕES DE APOIO ---
+def enviar_email_html(html_conteudo, hora):
+    try:
+        msg = MIMEMultipart()
+        msg['From'] = EMAIL_USER
+        msg['To'] = DESTINO
+        msg['Subject'] = f"RESUMO OPERACIONAL - {datetime.now().strftime('%d/%m/%Y')} ({hora})"
+        
+        msg.attach(MIMEText(html_conteudo, 'html'))
+        
+        with smtplib.SMTP("smtp.gmail.com", 587) as server:
+            server.starttls()
+            server.login(EMAIL_USER, EMAIL_PASS)
+            server.send_message(msg)
+        return True
+    except Exception as e:
+        st.error(f"Erro ao enviar e-mail: {e}")
+        return False
+
 def limpar_nome_navio(nome_bruto):
     if not nome_bruto: return ""
     nome = re.sub(r'^MV\s+|^M/V\s+|^MT\s+', '', nome_bruto.strip(), flags=re.IGNORECASE)
@@ -61,7 +79,6 @@ def buscar_dados_email():
         slz_lista = [n.strip() for n in partes[0].replace('SLZ:', '').split('\n') if n.strip() and "SLZ:" not in n.upper()]
         bel_lista = [n.strip() for n in partes[1].split('\n') if n.strip()] if len(partes) > 1 else []
         
-        # --- AJUSTE UTC -3 ---
         agora_brasil = datetime.now() - timedelta(hours=3)
         hoje_str = agora_brasil.strftime("%d-%b-%Y")
         inicio_do_dia = agora_brasil.replace(hour=0, minute=0, second=0, microsecond=0)
@@ -73,7 +90,6 @@ def buscar_dados_email():
             for e_id in ids[0].split():
                 _, data = mail.fetch(e_id, '(BODY[HEADER.FIELDS (SUBJECT DATE FROM)])')
                 msg = email.message_from_bytes(data[0][1])
-                # Ajusta data do e-mail recebido para o fuso local se necessário
                 data_envio = email.utils.parsedate_to_datetime(msg.get("Date")).replace(tzinfo=None)
                 if data_envio >= inicio_do_dia:
                     subj = "".join(str(c.decode(ch or 'utf-8', errors='ignore') if isinstance(c, bytes) else c) for c, ch in decode_header(msg.get("Subject", ""))).upper()
@@ -89,12 +105,11 @@ def buscar_dados_email():
 st.set_page_config(page_title="Gestão de Navios WS", layout="wide")
 st.title("🚢 Monitor Operacional Wilson Sons")
 
-# Exibe a hora atual do sistema (Brasília) para conferência
-hora_atual_br = (datetime.now() - timedelta(hours=3)).strftime('%H:%M:%S')
-st.info(f"Horário de Brasília (UTC-3): {hora_atual_br}")
+agora_br = datetime.now() - timedelta(hours=3)
+st.info(f"Horário de Brasília (UTC-3): {agora_br.strftime('%H:%M:%S')}")
 
-if st.button("🔄 1. Gerar Relatório (E-mails Prospect/Notice)"):
-    with st.spinner("Analisando e-mails recentes..."):
+if st.button("🔄 1. Gerar Relatório e Enviar E-mail"):
+    with st.spinner("Processando e-mails e enviando resumo..."):
         slz_bruto, bel_bruto, e_db, corte = buscar_dados_email()
         
         if not slz_bruto and not bel_bruto:
@@ -105,7 +120,6 @@ if st.button("🔄 1. Gerar Relatório (E-mails Prospect/Notice)"):
                 for n_bruto in lista:
                     n_limpo = limpar_nome_navio(n_bruto)
                     p_esp = identificar_porto_na_lista(n_bruto)
-                    # Filtra e-mails considerando a data de envio já comparada com o corte ajustado
                     m_g = [em for em in e_db if n_limpo in em["subj"] and any(r in em["from"] for r in rems) and any(k in em["subj"] for k in KEYWORDS)]
                     if p_esp: m_g = [em for em in m_g if any(tag in em["subj"] for tag in PORTOS_IDENTIFICADORES[p_esp])]
                     m_t = [em for em in m_g if em["date"] >= corte]
@@ -113,11 +127,28 @@ if st.button("🔄 1. Gerar Relatório (E-mails Prospect/Notice)"):
             
             st.session_state['lista_para_robo'] = [d['Navio'] for d in (res_slz + res_bel)]
             
+            # Exibição na tela
             col1, col2 = st.columns(2)
             with col1: st.subheader("SÃO LUÍS"); st.table(pd.DataFrame(res_slz))
             with col2: st.subheader("BELÉM / VDC"); st.table(pd.DataFrame(res_bel))
 
-# 2. FUNCIONALIDADE DO ROBÔ: CHECKLIST VISITADOR
+            # --- CONSTRUÇÃO DO HTML PARA E-MAIL ---
+            def tab_html(lista, titulo):
+                html = f"<h3>{titulo}</h3><table border='1' style='border-collapse: collapse; width: 100%;'>"
+                html += "<tr><th style='background-color: #f2f2f2;'>Navio</th><th style='background-color: #f2f2f2;'>Manhã</th><th style='background-color: #f2f2f2;'>Tarde</th></tr>"
+                for item in lista:
+                    html += f"<tr><td>{item['Navio']}</td><td style='text-align:center;'>{item['Manhã']}</td><td style='text-align:center;'>{item['Tarde']}</td></tr>"
+                html += "</table><br>"
+                return html
+
+            corpo_html = f"<h2>Resumo Operacional - {agora_br.strftime('%d/%m/%Y')}</h2>"
+            corpo_html += tab_html(res_slz, "SÃO LUÍS")
+            corpo_html += tab_html(res_bel, "BELÉM / VILA DO CONDE")
+
+            if enviar_email_html(corpo_html, agora_br.strftime('%H:%M')):
+                st.success(f"Relatório enviado com sucesso para {DESTINO}!")
+
+# 2. FUNCIONALIDADE DO ROBÔ
 st.sidebar.divider()
 st.sidebar.subheader("🔒 Acesso Visitador")
 ws_user = st.sidebar.text_input("Usuário WS")
@@ -125,9 +156,9 @@ ws_pass = st.sidebar.text_input("Senha WS", type="password")
 
 if st.button("🚀 2. Sincronizar Checklists (Todos os Navios)"):
     if 'lista_para_robo' not in st.session_state:
-        st.error("Primeiro gere o relatório (Botão 1) para identificar os navios.")
+        st.error("Primeiro gere o relatório (Botão 1).")
     elif not ws_user or not ws_pass:
-        st.warning("Informe as credenciais do Visitador na lateral.")
+        st.warning("Credenciais ausentes.")
     else:
         try:
             from ws_robot import extrair_checklist_ws
@@ -137,21 +168,18 @@ if st.button("🚀 2. Sincronizar Checklists (Todos os Navios)"):
             resultados = []
 
             for i, nome in enumerate(lista):
-                status_msg.text(f"Processando {nome} ({i+1}/{len(lista)})...")
+                status_msg.text(f"Processando {nome}...")
                 res = extrair_checklist_ws(ws_user, ws_pass, EMAIL_USER, EMAIL_PASS, nome)
-                # Se o robô retornar apenas o checklist, adicionamos o nome do navio
                 if isinstance(res, dict):
                     res["Navio"] = nome
                     resultados.append(res)
                 progresso.progress((i + 1) / len(lista))
             
-            status_msg.success("Sincronização concluída!")
-            st.subheader("📊 Status Real no Visitador")
+            status_msg.success("Checklists sincronizados!")
+            st.subheader("📊 Status no Visitador")
             if resultados:
                 df_res = pd.DataFrame(resultados)
-                # Reordenar colunas
                 cols = ["Navio"] + [c for c in df_res.columns if c != "Navio"]
                 st.dataframe(df_res[cols], use_container_width=True, hide_index=True)
-            
         except Exception as e:
-            st.error(f"Erro no processamento do robô: {e}")
+            st.error(f"Erro no robô: {e}")
