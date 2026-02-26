@@ -14,7 +14,7 @@ LABEL_PROSPECT = "PROSPECT"
 
 st_autorefresh(interval=60000, key="monitor_fast")
 
-# --- CONEXÃO GMAIL IMAP ---
+# --- CONEXÃO IMAP ---
 def conectar_gmail():
     try:
         mail = imaplib.IMAP4_SSL("imap.gmail.com")
@@ -23,39 +23,6 @@ def conectar_gmail():
     except Exception as e:
         st.error(f"Erro Gmail: {e}")
         return None
-
-# --- ENVIAR EMAIL ---
-def enviar_email(res_slz, res_bel):
-    try:
-        msg = MIMEMultipart()
-        msg["From"] = EMAIL_USER
-        msg["To"] = DESTINO
-        msg["Subject"] = "Monitor Prospects - Status"
-
-        def montar_tabela(lista, titulo):
-            html = f"<h3>{titulo}</h3><table border='1' cellpadding='4'>"
-            html += "<tr><th>Navio</th><th>Manhã</th><th>Tarde</th></tr>"
-            for r in lista:
-                html += f"<tr><td>{r['Navio']}</td><td>{r['Manhã']}</td><td>{r['Tarde']}</td></tr>"
-            html += "</table><br>"
-            return html
-
-        html = "<h2>Monitor Prospects</h2>"
-        html += montar_tabela(res_slz, "Filial São Luís")
-        html += montar_tabela(res_bel, "Filial Belém")
-
-        msg.attach(MIMEText(html, "html"))
-
-        server = smtplib.SMTP("smtp.gmail.com", 587)
-        server.starttls()
-        server.login(EMAIL_USER, EMAIL_PASS)
-        server.send_message(msg)
-        server.quit()
-
-        st.success("📧 Email enviado com sucesso!")
-
-    except Exception as e:
-        st.error(f"Erro ao enviar email: {e}")
 
 # --- LIMPAR NOME NAVIO ---
 def limpar_nome(txt):
@@ -70,10 +37,11 @@ def extrair_porto(txt):
     m = re.search(r'\((.*?)\)', txt)
     return m.group(1).strip().upper() if m else None
 
-# --- LISTA NAVIOS ---
+# --- LISTA NAVIOS (CORRIGIDO MULTIPART) ---
 def obter_lista_navios(mail):
     mail.select("INBOX", readonly=True)
     _, data = mail.search(None, '(SUBJECT "LISTA NAVIOS")')
+
     if not data[0]:
         return [], []
 
@@ -81,7 +49,17 @@ def obter_lista_navios(mail):
     _, d = mail.fetch(eid, '(RFC822)')
     msg = email.message_from_bytes(d[0][1])
 
-    corpo = msg.get_payload(decode=True).decode(errors='ignore')
+    corpo = ""
+
+    if msg.is_multipart():
+        for part in msg.walk():
+            if part.get_content_type() == "text/plain":
+                corpo = part.get_payload(decode=True).decode(errors="ignore")
+                break
+    else:
+        corpo = msg.get_payload(decode=True).decode(errors="ignore")
+
+    corpo = re.split(r'Regards|Best regards', corpo, flags=re.IGNORECASE)[0]
     partes = re.split(r'BELEM:', corpo, flags=re.IGNORECASE)
 
     slz = [n.strip() for n in partes[0].replace('SLZ:', '').split('\n') if n.strip()]
@@ -97,7 +75,7 @@ def buscar_emails(mail):
 
     lista = []
     if data[0]:
-        for eid in data[0].split()[-200:]:
+        for eid in data[0].split()[-300:]:
             try:
                 _, d = mail.fetch(eid, '(BODY.PEEK[HEADER.FIELDS (SUBJECT DATE)])')
                 msg = email.message_from_bytes(d[0][1])
@@ -111,7 +89,41 @@ def buscar_emails(mail):
                 lista.append({"subj": subj, "date": envio})
             except:
                 continue
+
     return lista
+
+# --- ENVIAR EMAIL ---
+def enviar_email(res_slz, res_bel):
+    try:
+        msg = MIMEMultipart()
+        msg["From"] = EMAIL_USER
+        msg["To"] = DESTINO
+        msg["Subject"] = "Monitor Prospects - Status"
+
+        def tabela(lista, titulo):
+            html = f"<h3>{titulo}</h3><table border='1' cellpadding='4'>"
+            html += "<tr><th>Navio</th><th>Manhã</th><th>Tarde</th></tr>"
+            for r in lista:
+                html += f"<tr><td>{r['Navio']}</td><td>{r['Manhã']}</td><td>{r['Tarde']}</td></tr>"
+            html += "</table><br>"
+            return html
+
+        html = "<h2>Monitor Prospects</h2>"
+        html += tabela(res_slz, "Filial São Luís")
+        html += tabela(res_bel, "Filial Belém")
+
+        msg.attach(MIMEText(html, "html"))
+
+        server = smtplib.SMTP("smtp.gmail.com", 587)
+        server.starttls()
+        server.login(EMAIL_USER, EMAIL_PASS)
+        server.send_message(msg)
+        server.quit()
+
+        st.success("📧 Email enviado!")
+
+    except Exception as e:
+        st.error(f"Erro ao enviar email: {e}")
 
 # --- EXECUTAR ---
 def executar():
@@ -127,21 +139,31 @@ def executar():
 
     def analisar(lista, is_belem=False):
         resultado = []
+
         for item in lista:
             nome_base = limpar_nome(item)
             porto = extrair_porto(item)
 
             if is_belem and nomes_base_bel.count(nome_base) > 1 and porto:
-                emails_navio = [e for e in emails if nome_base in e["subj"] and porto in e["subj"]]
+                emails_navio = [
+                    e for e in emails
+                    if nome_base in e["subj"] and porto in e["subj"]
+                ]
             else:
-                emails_navio = [e for e in emails if nome_base in e["subj"]]
+                emails_navio = [
+                    e for e in emails
+                    if nome_base in e["subj"]
+                ]
 
             manha = any(e["date"].hour < 12 for e in emails_navio)
             tarde = any(e["date"].hour >= 14 for e in emails_navio)
 
-            resultado.append({"Navio": f"{nome_base} ({porto})" if porto else nome_base,
-                              "Manhã": "✅" if manha else "❌",
-                              "Tarde": "✅" if tarde else "❌"})
+            resultado.append({
+                "Navio": f"{nome_base} ({porto})" if porto else nome_base,
+                "Manhã": "✅" if manha else "❌",
+                "Tarde": "✅" if tarde else "❌"
+            })
+
         return resultado
 
     res_slz = analisar(slz_lista)
