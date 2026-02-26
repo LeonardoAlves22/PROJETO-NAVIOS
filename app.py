@@ -91,66 +91,8 @@ def buscar_emails(mail):
                 continue
     return lista
 
-# --- EMAIL BONITO ---
-def enviar_email(res_slz, res_bel):
-    try:
-        msg = MIMEMultipart()
-        msg["From"] = EMAIL_USER
-        msg["To"] = DESTINO
-        msg["Subject"] = "Monitor Prospects - Status"
-
-        def linhas(lista):
-            html = ""
-            for r in lista:
-                cor_m = "#28a745" if r["Manhã"] == "✅" else "#dc3545"
-                cor_t = "#28a745" if r["Tarde"] == "✅" else "#dc3545"
-                html += f"""
-                <tr>
-                    <td style="padding:6px;border-bottom:1px solid #ddd">{r['Navio']}</td>
-                    <td style="background:{cor_m};color:white;text-align:center">{r['Manhã']}</td>
-                    <td style="background:{cor_t};color:white;text-align:center">{r['Tarde']}</td>
-                </tr>
-                """
-            return html
-
-        html = f"""
-        <html>
-        <body style="font-family:Arial;background:#eaf3ff;padding:20px">
-        <h2 style="background:#2b6cb0;color:white;padding:10px;border-radius:6px">🚢 Monitor Prospects</h2>
-        <table width="100%"><tr>
-        <td width="50%">
-        <h3>Filial São Luís</h3>
-        <table border="1" width="100%" style="border-collapse:collapse">
-        <tr><th>Navio</th><th>Manhã</th><th>Tarde</th></tr>
-        {linhas(res_slz)}
-        </table>
-        </td>
-        <td width="50%">
-        <h3>Filial Belém</h3>
-        <table border="1" width="100%" style="border-collapse:collapse">
-        <tr><th>Navio</th><th>Manhã</th><th>Tarde</th></tr>
-        {linhas(res_bel)}
-        </table>
-        </td>
-        </tr></table>
-        </body></html>
-        """
-
-        msg.attach(MIMEText(html, "html"))
-
-        server = smtplib.SMTP("smtp.gmail.com", 587)
-        server.starttls()
-        server.login(EMAIL_USER, EMAIL_PASS)
-        server.send_message(msg)
-        server.quit()
-
-        st.success("📧 Email enviado!")
-
-    except Exception as e:
-        st.error(f"Erro email: {e}")
-
-# --- EXECUTAR ---
-def executar():
+# --- GERAR RELATÓRIO (SEM EMAIL) ---
+def gerar_relatorio():
     mail = conectar_gmail()
     if not mail:
         return
@@ -175,18 +117,64 @@ def executar():
             manha = any(e["date"].hour < 12 for e in emails_navio)
             tarde = any(e["date"].hour >= 14 for e in emails_navio)
 
-            res.append({"Navio": f"{nome} ({porto})" if porto else nome,
-                        "Manhã": "✅" if manha else "❌",
-                        "Tarde": "✅" if tarde else "❌"})
+            res.append({
+                "Navio": f"{nome} ({porto})" if porto else nome,
+                "Manhã": "✅" if manha else "❌",
+                "Tarde": "✅" if tarde else "❌"
+            })
         return res
 
-    res_slz = analisar(slz)
-    res_bel = analisar(bel, True)
+    st.session_state['slz'] = analisar(slz)
+    st.session_state['bel'] = analisar(bel, True)
 
-    st.session_state['slz'] = res_slz
-    st.session_state['bel'] = res_bel
+# --- EMAIL ---
+def enviar_email():
+    if 'slz' not in st.session_state:
+        return
 
-    enviar_email(res_slz, res_bel)
+    try:
+        msg = MIMEMultipart()
+        msg["From"] = EMAIL_USER
+        msg["To"] = DESTINO
+        msg["Subject"] = "Monitor Prospects - Status"
+
+        def linhas(lista):
+            html = ""
+            for r in lista:
+                cor_m = "#28a745" if r["Manhã"] == "✅" else "#dc3545"
+                cor_t = "#28a745" if r["Tarde"] == "✅" else "#dc3545"
+                html += f"""
+                <tr>
+                    <td>{r['Navio']}</td>
+                    <td style="background:{cor_m};color:white;text-align:center">{r['Manhã']}</td>
+                    <td style="background:{cor_t};color:white;text-align:center">{r['Tarde']}</td>
+                </tr>
+                """
+            return html
+
+        html = f"""
+        <html><body style="font-family:Arial;background:#eaf3ff;padding:20px">
+        <h2 style="background:#2b6cb0;color:white;padding:10px;border-radius:6px">🚢 Monitor Prospects</h2>
+        <table width="100%"><tr>
+        <td width="50%"><h3>São Luís</h3>
+        <table border="1" width="100%">{linhas(st.session_state['slz'])}</table></td>
+        <td width="50%"><h3>Belém</h3>
+        <table border="1" width="100%">{linhas(st.session_state['bel'])}</table></td>
+        </tr></table></body></html>
+        """
+
+        msg.attach(MIMEText(html, "html"))
+
+        server = smtplib.SMTP("smtp.gmail.com", 587)
+        server.starttls()
+        server.login(EMAIL_USER, EMAIL_PASS)
+        server.send_message(msg)
+        server.quit()
+
+        st.success("📧 Email enviado!")
+
+    except Exception as e:
+        st.error(f"Erro email: {e}")
 
 # --- AUTO ENVIO ---
 agora = (datetime.now() - timedelta(hours=3)).strftime("%H:%M")
@@ -195,14 +183,23 @@ if "ultimo_envio" not in st.session_state:
     st.session_state["ultimo_envio"] = ""
 
 if agora in HORARIOS and st.session_state["ultimo_envio"] != agora:
-    executar()
+    gerar_relatorio()
+    enviar_email()
     st.session_state["ultimo_envio"] = agora
 
 # --- UI ---
 st.title("🚢 Monitor Wilson Sons")
 
-if st.button("📧 Enviar Manualmente Agora"):
-    executar()
+col1, col2 = st.columns(2)
+
+with col1:
+    if st.button("🔄 Atualizar Relatório (sem email)"):
+        gerar_relatorio()
+
+with col2:
+    if st.button("📧 Atualizar + Enviar Email"):
+        gerar_relatorio()
+        enviar_email()
 
 if 'slz' in st.session_state:
     c1, c2 = st.columns(2)
