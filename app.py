@@ -15,14 +15,25 @@ REMS = {
 
 st_autorefresh(interval=60000, key="monitor_fast")
 
-# --- CONEXÃO ---
+# --- CONEXÃO GMAIL (CORRIGIDA) ---
 def conectar_gmail():
     try:
         mail = imaplib.IMAP4_SSL("imap.gmail.com")
         mail.login(EMAIL_USER, EMAIL_PASS)
-        mail.select('"[Gmail]/All Mail"', readonly=True)
+
+        # Tenta abrir All Mail
+        status, _ = mail.select('"[Gmail]/All Mail"', readonly=True)
+
+        if status != "OK":
+            # fallback para INBOX
+            status, _ = mail.select("INBOX", readonly=True)
+            if status != "OK":
+                return None
+
         return mail
-    except:
+
+    except Exception as e:
+        st.error(f"Erro ao conectar Gmail: {e}")
         return None
 
 # --- LIMPEZA DE NOME ---
@@ -72,12 +83,12 @@ def buscar_emails_hoje(mail):
             filtros.append(f'(FROM "{remetente}")')
 
     criterio = f'(SINCE "{hoje}" {" ".join(filtros)})'
-
     _, data = mail.search(None, criterio)
 
     lista = []
     if data[0]:
-        ids = data[0].split()[-200:]  # limita últimos 200
+        ids = data[0].split()[-200:]
+
         if ids:
             _, dados = mail.fetch(",".join(ids),
                                   '(BODY.PEEK[HEADER.FIELDS (SUBJECT DATE FROM)])')
@@ -106,16 +117,15 @@ def buscar_emails_hoje(mail):
 
     return lista
 
-# --- INDEXADOR (ELIMINA LOOP DUPLO) ---
+# --- INDEXADOR ---
 def indexar_emails(db):
     index = {}
     for e in db:
-        palavras = e["subj"].split()
-        for p in palavras:
-            p = p.strip()
-            if p not in index:
-                index[p] = []
-            index[p].append(e)
+        for palavra in e["subj"].split():
+            palavra = palavra.strip()
+            if palavra not in index:
+                index[palavra] = []
+            index[palavra].append(e)
     return index
 
 # --- EXECUÇÃO PRINCIPAL ---
@@ -168,7 +178,7 @@ def executar():
     st.session_state['res_slz'] = res_slz
     st.session_state['res_bel'] = res_bel
 
-# --- STREAMLIT UI ---
+# --- STREAMLIT ---
 st.set_page_config(page_title="Monitor WS FAST", layout="wide")
 st.title("🚢 Monitor Wilson Sons 3.0 (Fast Mode)")
 
