@@ -161,3 +161,17 @@ def executar_tudo():
         enviar_relatorio_email(res_slz, res_bel, hora_atual)
         return True
     return False
+
+if st.button("🔄 ATUALIZAR E ENVIAR E-MAIL AGORA"):
+    with st.status("Processando..."):
+        if executar_tudo(): st.success("Relatório atualizado e enviado!")
+
+if 'res_slz' in st.session_state:
+    c1, c2 = st.columns(2)
+    with c1: st.subheader("SÃO LUÍS"); st.table(st.session_state['res_slz'])
+    with c2: st.subheader("BELÉM / VDC"); st.table(st.session_state['res_bel'])
+
+if hora_atual in HORARIOS:
+    if "ultimo_envio" not in st.session_state or st.session_state.ultimo_envio != hora_atual:
+        executar_tudo()
+        st.session_state.ultimo_envio = hora_atual
