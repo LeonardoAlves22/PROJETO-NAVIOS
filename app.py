@@ -21,21 +21,28 @@ def conectar_gmail():
         st.error(f"Erro Gmail: {e}")
         return None
 
-# --- LIMPAR NOME NAVIO ---
-def limpar_nome(txt):
+# --- LIMPAR NOME BASE ---
+def limpar_nome_base(txt):
     n = re.sub(r'^(MV|M/V|MT|M/T)\s+', '', txt.strip(), flags=re.IGNORECASE)
-    n = re.split(r'\s-\s', n)[0]  # corta após hífen
+    n = re.split(r'\s-\s', n)[0]
     n = re.sub(r'\(.*?\)', '', n)
     n = re.sub(r'\s+', ' ', n)
     return n.strip().upper()
 
-# --- LISTA NAVIOS (INBOX) ---
+# --- EXTRAIR PORTO ENTRE PARÊNTESES ---
+def extrair_porto(txt):
+    match = re.search(r'\((.*?)\)', txt)
+    if match:
+        return match.group(1).strip().upper()
+    return None
+
+# --- LISTA NAVIOS ---
 def obter_lista_navios(mail):
     mail.select("INBOX", readonly=True)
     _, data = mail.search(None, '(SUBJECT "LISTA NAVIOS")')
 
     if not data[0]:
-        return [], []
+        return []
 
     eid = data[0].split()[-1]
     _, d = mail.fetch(eid, '(RFC822)')
@@ -51,14 +58,18 @@ def obter_lista_navios(mail):
         corpo = msg.get_payload(decode=True).decode(errors='ignore')
 
     corpo = re.split(r'Regards|Best regards', corpo, flags=re.IGNORECASE)[0]
-    partes = re.split(r'BELEM:', corpo, flags=re.IGNORECASE)
 
-    slz = [n.strip() for n in partes[0].replace('SLZ:', '').split('\n') if n.strip()]
-    bel = [n.strip() for n in partes[1].split('\n') if n.strip()] if len(partes) > 1 else []
+    linhas = [l.strip() for l in corpo.split("\n") if l.strip()]
+    navios = []
 
-    return slz, bel
+    for linha in linhas:
+        if "SLZ:" in linha.upper() or "BELEM:" in linha.upper():
+            continue
+        navios.append(linha)
 
-# --- EMAILS PROSPECT (LABEL) ---
+    return navios
+
+# --- EMAILS PROSPECT ---
 def buscar_emails_prospect(mail):
     mail.select(f'"{LABEL_PROSPECT}"', readonly=True)
 
@@ -67,7 +78,7 @@ def buscar_emails_prospect(mail):
 
     lista = []
     if data[0]:
-        for eid in data[0].split()[-200:]:
+        for eid in data[0].split()[-300:]:
             try:
                 _, d = mail.fetch(eid, '(BODY.PEEK[HEADER.FIELDS (SUBJECT DATE)])')
                 msg = email.message_from_bytes(d[0][1])
@@ -78,61 +89,53 @@ def buscar_emails_prospect(mail):
                 ).upper()
 
                 envio = email.utils.parsedate_to_datetime(msg.get("Date")).replace(tzinfo=None)
+
                 lista.append({"subj": subj, "date": envio})
             except:
                 continue
 
     return lista
 
-# --- EXECUTAR ---
+# --- EXECUÇÃO ---
 def executar():
     mail = conectar_gmail()
     if not mail:
         return
 
-    slz, bel = obter_lista_navios(mail)
+    navios_lista = obter_lista_navios(mail)
     emails = buscar_emails_prospect(mail)
     mail.logout()
 
-    agora = datetime.now() - timedelta(hours=3)
+    resultados = []
 
-    res_slz, res_bel = [], []
+    for item in navios_lista:
+        nome_base = limpar_nome_base(item)
+        porto = extrair_porto(item)
 
-    def analisar(lista_navios):
-        resultado = []
-        for n in lista_navios:
-            nome = limpar_nome(n)
+        if porto:
+            criterio_subject = f"{nome_base} - {porto}"
+        else:
+            criterio_subject = nome_base
 
-            emails_navio = [e for e in emails if nome in e["subj"]]
+        emails_navio = [e for e in emails if criterio_subject in e["subj"]]
 
-            manha = any(e["date"].hour < 12 for e in emails_navio)
-            tarde = any(e["date"].hour >= 14 for e in emails_navio)
+        manha = any(e["date"].hour < 12 for e in emails_navio)
+        tarde = any(e["date"].hour >= 14 for e in emails_navio)
 
-            resultado.append({
-                "Navio": nome,
-                "Manhã": "✅" if manha else "❌",
-                "Tarde": "✅" if tarde else "❌"
-            })
-        return resultado
+        resultados.append({
+            "Navio": f"{nome_base} ({porto})" if porto else nome_base,
+            "Manhã": "✅" if manha else "❌",
+            "Tarde": "✅" if tarde else "❌"
+        })
 
-    res_slz = analisar(slz)
-    res_bel = analisar(bel)
-
-    st.session_state['res_slz'] = res_slz
-    st.session_state['res_bel'] = res_bel
+    st.session_state['resultado'] = resultados
 
 # --- STREAMLIT ---
 st.set_page_config(page_title="Monitor WS", layout="wide")
-st.title("🚢 Monitor Wilson Sons")
+st.title("🚢 Monitor Wilson Sons – Diferenciação por Porto")
 
 if st.button("🔄 Atualizar"):
     executar()
 
-if 'res_slz' in st.session_state:
-    c1, c2 = st.columns(2)
-    with c1:
-        st.subheader("São Luís")
-        st.table(st.session_state['res_slz'])
-    with c2:
-        st.subheader("Belém")
-        st.table(st.session_state['res_bel'])
+if 'resultado' in st.session_state:
+    st.table(st.session_state['resultado'])
