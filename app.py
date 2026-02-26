@@ -21,7 +21,7 @@ def conectar_gmail():
         st.error(f"Erro Gmail: {e}")
         return None
 
-# --- LIMPAR NOME BASE ---
+# --- LIMPAR NOME ---
 def limpar_nome(txt):
     n = re.sub(r'^(MV|M/V|MT|M/T)\s+', '', txt.strip(), flags=re.IGNORECASE)
     n = re.split(r'\s-\s', n)[0]  # corta após hífen
@@ -29,15 +29,16 @@ def limpar_nome(txt):
     n = re.sub(r'\s+', ' ', n)
     return n.strip().upper()
 
-# --- EXTRAIR PORTO ENTRE () ---
+# --- EXTRAIR PORTO ENTRE PARÊNTESES ---
 def extrair_porto(txt):
     m = re.search(r'\((.*?)\)', txt)
     return m.group(1).strip().upper() if m else None
 
-# --- LISTA NAVIOS ---
+# --- OBTER LISTA NAVIOS ---
 def obter_lista_navios(mail):
     mail.select("INBOX", readonly=True)
     _, data = mail.search(None, '(SUBJECT "LISTA NAVIOS")')
+
     if not data[0]:
         return [], []
 
@@ -62,7 +63,7 @@ def obter_lista_navios(mail):
 
     return slz, bel
 
-# --- EMAILS PROSPECT ---
+# --- BUSCAR EMAILS PROSPECT ---
 def buscar_emails(mail):
     mail.select(f'"{LABEL_PROSPECT}"', readonly=True)
     hoje = (datetime.now() - timedelta(hours=3)).strftime("%d-%b-%Y")
@@ -81,12 +82,13 @@ def buscar_emails(mail):
                 ).upper()
 
                 envio = email.utils.parsedate_to_datetime(msg.get("Date")).replace(tzinfo=None)
+
                 lista.append({"subj": subj, "date": envio})
             except:
                 continue
     return lista
 
-# --- EXECUÇÃO ---
+# --- EXECUTAR ---
 def executar():
     mail = conectar_gmail()
     if not mail:
@@ -96,21 +98,26 @@ def executar():
     emails = buscar_emails(mail)
     mail.logout()
 
-    # Detectar duplicados em Belém
     nomes_base_bel = [limpar_nome(n) for n in bel_lista]
 
     def analisar(lista, is_belem=False):
         resultado = []
-        for n in lista:
-            nome_base = limpar_nome(n)
-            porto = extrair_porto(n)
 
+        for item in lista:
+            nome_base = limpar_nome(item)
+            porto = extrair_porto(item)
+
+            # Se for Belém e houver duplicidade
             if is_belem and nomes_base_bel.count(nome_base) > 1 and porto:
-                criterio = f"{nome_base} - {porto}"
+                emails_navio = [
+                    e for e in emails
+                    if nome_base in e["subj"] and porto in e["subj"]
+                ]
             else:
-                criterio = nome_base
-
-            emails_navio = [e for e in emails if criterio in e["subj"]]
+                emails_navio = [
+                    e for e in emails
+                    if nome_base in e["subj"]
+                ]
 
             manha = any(e["date"].hour < 12 for e in emails_navio)
             tarde = any(e["date"].hour >= 14 for e in emails_navio)
@@ -120,6 +127,7 @@ def executar():
                 "Manhã": "✅" if manha else "❌",
                 "Tarde": "✅" if tarde else "❌"
             })
+
         return resultado
 
     st.session_state['slz'] = analisar(slz_lista)
@@ -134,9 +142,11 @@ if st.button("🔄 Atualizar"):
 
 if 'slz' in st.session_state:
     c1, c2 = st.columns(2)
+
     with c1:
         st.subheader("Filial São Luís")
         st.table(st.session_state['slz'])
+
     with c2:
         st.subheader("Filial Belém")
         st.table(st.session_state['bel'])
