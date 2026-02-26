@@ -46,7 +46,7 @@ def enviar_email_html(html_conteudo, hora_ref):
 def selecionar_pasta_segura(mail):
     """Tenta selecionar a pasta correta para evitar o erro de estado AUTH"""
     # Ordem de tentativa: Pasta técnica do Gmail, Pasta em Português, Inbox padrão
-    pastas = ['"[Gmail]/All Mail"', '"[Gmail]/Todos os e-mails"', 'INBOX']
+    pastas = ['"[Gmail]/All Mail"', '"[Gmail]/Todos os e-mails"', 'INBOX','Caixa de entrada']
     for pasta in pastas:
         try:
             status, _ = mail.select(pasta, readonly=True)
