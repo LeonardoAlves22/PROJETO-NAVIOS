@@ -17,7 +17,6 @@ DESTINOS = [
 ]
 
 LABEL_PROSPECT = "PROSPECT"
-
 HORARIOS = ["09:30","10:00","11:00","11:30","16:00","17:00","17:30"]
 
 st_autorefresh(interval=60000, key="auto_refresh")
@@ -73,7 +72,7 @@ def obter_lista_navios(mail):
 
     return slz, bel
 
-# --- BUSCAR EMAILS ---
+# --- BUSCAR EMAILS (COM TIMEZONE CORRIGIDO) ---
 def buscar_emails(mail):
     mail.select(f'"{LABEL_PROSPECT}"', readonly=True)
     hoje = (datetime.now() - timedelta(hours=3)).strftime("%d-%b-%Y")
@@ -91,8 +90,14 @@ def buscar_emails(mail):
                     for c, ch in decode_header(msg.get("Subject", ""))
                 ).upper()
 
-                envio = email.utils.parsedate_to_datetime(msg.get("Date")).replace(tzinfo=None)
-                lista.append({"subj": subj, "date": envio})
+                # UTC → BRASIL
+                envio_utc = email.utils.parsedate_to_datetime(msg.get("Date"))
+                envio_br = envio_utc - timedelta(hours=3)
+
+                lista.append({
+                    "subj": subj,
+                    "date": envio_br.replace(tzinfo=None)
+                })
             except:
                 continue
     return lista
@@ -108,6 +113,7 @@ def gerar_relatorio():
     mail.logout()
 
     nomes_base_bel = [limpar_nome(n) for n in bel]
+    agora_br = datetime.now() - timedelta(hours=3)
 
     def analisar(lista, is_belem=False):
         res = []
@@ -121,7 +127,10 @@ def gerar_relatorio():
                 emails_navio = [e for e in emails if nome in e["subj"]]
 
             manha = any(e["date"].hour < 12 for e in emails_navio)
-            tarde = any(e["date"].hour >= 14 for e in emails_navio)
+
+            tarde = False
+            if agora_br.hour >= 14:
+                tarde = any(e["date"].hour >= 14 for e in emails_navio)
 
             res.append({
                 "Navio": f"{nome} ({porto})" if porto else nome,
@@ -133,7 +142,7 @@ def gerar_relatorio():
     st.session_state['slz'] = analisar(slz)
     st.session_state['bel'] = analisar(bel, True)
 
-# --- ENVIAR EMAIL ---
+# --- EMAIL ---
 def enviar_email():
     if 'slz' not in st.session_state:
         return
@@ -177,7 +186,7 @@ def enviar_email():
         server.send_message(msg)
         server.quit()
 
-        st.success("📧 Email enviado para todos os destinatários!")
+        st.success("📧 Email enviado!")
 
     except Exception as e:
         st.error(f"Erro email: {e}")
