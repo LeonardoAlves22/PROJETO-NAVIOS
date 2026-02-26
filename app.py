@@ -24,8 +24,8 @@ PORTOS_IDENTIFICADORES = {
     "VDC": ["VILA DO CONDE", "VDC", "BARCARENA"]
 }
 
-# Auto-refresh para manter o script ativo e checar horários de disparo
-st_autorefresh(interval=60000, key="auto_disparo_v7")
+# Auto-refresh para manter o app ativo na nuvem
+st_autorefresh(interval=60000, key="auto_disparo_v8")
 
 # --- FUNÇÕES DE APOIO ---
 def enviar_email_html(html_conteudo, hora_ref):
@@ -48,9 +48,9 @@ def limpar_nome_navio(nome_bruto):
     if not nome_bruto: return ""
     nome_up = nome_bruto.upper()
     sufixo_porto = ""
-    if "(VILA DO CONDE)" in nome_up or "(VDC)" in nome_up:
+    if "VILA DO CONDE" in nome_up or "VDC" in nome_up:
         sufixo_porto = " (VILA DO CONDE)"
-    elif "(BELEM)" in nome_up:
+    elif "BELEM" in nome_up:
         sufixo_porto = " (BELEM)"
 
     nome = re.sub(r'^MV\s+|^M/V\s+|^MT\s+|^M/T\s+', '', nome_bruto.strip(), flags=re.IGNORECASE)
@@ -61,4 +61,55 @@ def limpar_nome_navio(nome_bruto):
 def identificar_porto_na_lista(nome_bruto):
     nome_up = nome_bruto.upper()
     if "BELEM" in nome_up: return "BEL"
-    if "VILA DO CONDE" in nome_up or "VDC" in nome
+    if "VILA DO CONDE" in nome_up or "VDC" in nome_up: return "VDC"
+    return None
+
+def selecionar_pasta_todos(mail):
+    pastas = ['"[Gmail]/All Mail"', '"[Gmail]/Todos os e-mails"', 'INBOX']
+    for p in pastas:
+        status, _ = mail.select(p, readonly=True)
+        if status == 'OK': return True
+    return False
+
+def buscar_dados_email():
+    try:
+        mail = imaplib.IMAP4_SSL("imap.gmail.com")
+        mail.login(EMAIL_USER, EMAIL_PASS)
+        if not selecionar_pasta_todos(mail):
+            mail.logout()
+            return [], [], [], (datetime.now() - timedelta(hours=3))
+
+        _, messages = mail.search(None, '(SUBJECT "LISTA NAVIOS")')
+        if not messages[0]: 
+            mail.logout()
+            return [], [], [], (datetime.now() - timedelta(hours=3))
+        
+        ultimo_id = messages[0].split()[-1]
+        _, data = mail.fetch(ultimo_id, '(RFC822)')
+        msg_raw = email.message_from_bytes(data[0][1])
+        
+        corpo = ""
+        if msg_raw.is_multipart():
+            for part in msg_raw.walk():
+                if part.get_content_type() == "text/plain":
+                    corpo = part.get_payload(decode=True).decode(errors='ignore')
+                    break
+        else:
+            corpo = msg_raw.get_payload(decode=True).decode(errors='ignore')
+        
+        corpo_limpo = re.split(r'Best regards|Regards', corpo, flags=re.IGNORECASE)[0]
+        partes = re.split(r'BELEM:', corpo_limpo, flags=re.IGNORECASE)
+        
+        slz_lista = [n.strip() for n in partes[0].replace('SLZ:', '').split('\n') if n.strip() and "SLZ:" not in n.upper()]
+        bel_lista = [n.strip() for n in partes[1].split('\n') if n.strip()] if len(partes) > 1 else []
+        
+        agora_brasil = datetime.now() - timedelta(hours=3)
+        hoje_str = agora_brasil.strftime("%d-%b-%Y")
+        
+        _, ids = mail.search(None, f'(SINCE "{hoje_str}")')
+        emails_encontrados = []
+        if ids[0]:
+            for e_id in ids[0].split():
+                _, data = mail.fetch(e_id, '(BODY[HEADER.FIELDS (SUBJECT DATE FROM)])')
+                msg = email.message_from_bytes(data[0][1])
+                data_envio = email.utils.parsed
