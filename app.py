@@ -12,7 +12,7 @@ EMAIL_PASS = "ighf pteu xtfx fkom"
 DESTINO = "leonardo.alves@wilsonsons.com.br"
 LABEL_PROSPECT = "PROSPECT"
 
-HORARIOS = ["09:30","10:00","11:00","11:30","16:00","17:00","17:30","23:28"]
+HORARIOS = ["09:30","10:00","11:00","11:30","16:00","17:00","17:30"]
 
 st_autorefresh(interval=60000, key="auto_refresh")
 
