@@ -51,7 +51,7 @@ def buscar_dados_email():
         mail.login(EMAIL_USER, EMAIL_PASS)
         
         # Seleciona a pasta "Todos os e-mails" usando o nome técnico do Gmail
-        status, _ = mail.select('"[Gmail]/All Mail"', readonly=True)
+        status, _ = mail.select('"[Gmail]/Todos os e-mails"', readonly=True)
         
         if status != 'OK':
             # Backup caso o nome da pasta seja diferente na configuração da conta
