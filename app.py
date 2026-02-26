@@ -12,11 +12,11 @@ EMAIL_PASS = "ighf pteu xtfx fkom"
 DESTINO = "leonardo.alves@wilsonsons.com.br"
 LABEL_PROSPECT = "PROSPECT"
 
-HORARIOS = ["09:30", "10:00", "11:00", "11:30", "16:00", "17:00", "17:30", "23:28"]
+HORARIOS = ["09:30","10:00","11:00","11:30","16:00","17:00","17:30","23:28"]
 
-st_autorefresh(interval=60000, key="monitor_auto")  # roda a cada 60s
+st_autorefresh(interval=60000, key="auto_refresh")
 
-# --- CONEXÃO IMAP ---
+# --- CONEXÃO ---
 def conectar_gmail():
     try:
         mail = imaplib.IMAP4_SSL("imap.gmail.com")
@@ -26,7 +26,7 @@ def conectar_gmail():
         st.error(f"Erro Gmail: {e}")
         return None
 
-# --- LIMPAR NOME ---
+# --- LIMPAR NOME NAVIO ---
 def limpar_nome(txt):
     n = re.sub(r'^(MV|M/V|MT|M/T)\s+', '', txt.strip(), flags=re.IGNORECASE)
     n = re.split(r'\s-\s', n)[0]
@@ -67,7 +67,7 @@ def obter_lista_navios(mail):
 
     return slz, bel
 
-# --- BUSCAR EMAILS ---
+# --- BUSCAR EMAILS PROSPECT ---
 def buscar_emails(mail):
     mail.select(f'"{LABEL_PROSPECT}"', readonly=True)
     hoje = (datetime.now() - timedelta(hours=3)).strftime("%d-%b-%Y")
@@ -91,7 +91,7 @@ def buscar_emails(mail):
                 continue
     return lista
 
-# --- EMAIL ---
+# --- EMAIL BONITO ---
 def enviar_email(res_slz, res_bel):
     try:
         msg = MIMEMultipart()
@@ -107,8 +107,8 @@ def enviar_email(res_slz, res_bel):
                 html += f"""
                 <tr>
                     <td style="padding:6px;border-bottom:1px solid #ddd">{r['Navio']}</td>
-                    <td style="text-align:center;background:{cor_m};color:white">{r['Manhã']}</td>
-                    <td style="text-align:center;background:{cor_t};color:white">{r['Tarde']}</td>
+                    <td style="background:{cor_m};color:white;text-align:center">{r['Manhã']}</td>
+                    <td style="background:{cor_t};color:white;text-align:center">{r['Tarde']}</td>
                 </tr>
                 """
             return html
@@ -144,7 +144,7 @@ def enviar_email(res_slz, res_bel):
         server.send_message(msg)
         server.quit()
 
-        st.success("📧 Email enviado automaticamente!")
+        st.success("📧 Email enviado!")
 
     except Exception as e:
         st.error(f"Erro email: {e}")
@@ -188,7 +188,7 @@ def executar():
 
     enviar_email(res_slz, res_bel)
 
-# --- AUTO DISPARO ---
+# --- AUTO ENVIO ---
 agora = (datetime.now() - timedelta(hours=3)).strftime("%H:%M")
 
 if "ultimo_envio" not in st.session_state:
@@ -198,8 +198,11 @@ if agora in HORARIOS and st.session_state["ultimo_envio"] != agora:
     executar()
     st.session_state["ultimo_envio"] = agora
 
-# --- INTERFACE ---
-st.title("🚢 Monitor Wilson Sons - Auto")
+# --- UI ---
+st.title("🚢 Monitor Wilson Sons")
+
+if st.button("📧 Enviar Manualmente Agora"):
+    executar()
 
 if 'slz' in st.session_state:
     c1, c2 = st.columns(2)
