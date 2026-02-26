@@ -9,7 +9,13 @@ from streamlit_autorefresh import st_autorefresh
 # --- CONFIG ---
 EMAIL_USER = "leonardo.alves@wilsonsons.com.br"
 EMAIL_PASS = "ighf pteu xtfx fkom"
-DESTINO = "leonardo.alves@wilsonsons.com.br"
+
+DESTINOS = [
+    "leonardo.alves@wilsonsons.com.br",
+    "operation.belem@wilsonsons.com.br",
+    "operation.sluis@wilsonsons.com.br"
+]
+
 LABEL_PROSPECT = "PROSPECT"
 
 HORARIOS = ["09:30","10:00","11:00","11:30","16:00","17:00","17:30"]
@@ -26,7 +32,7 @@ def conectar_gmail():
         st.error(f"Erro Gmail: {e}")
         return None
 
-# --- LIMPAR NOME NAVIO ---
+# --- LIMPAR NOME ---
 def limpar_nome(txt):
     n = re.sub(r'^(MV|M/V|MT|M/T)\s+', '', txt.strip(), flags=re.IGNORECASE)
     n = re.split(r'\s-\s', n)[0]
@@ -67,7 +73,7 @@ def obter_lista_navios(mail):
 
     return slz, bel
 
-# --- BUSCAR EMAILS PROSPECT ---
+# --- BUSCAR EMAILS ---
 def buscar_emails(mail):
     mail.select(f'"{LABEL_PROSPECT}"', readonly=True)
     hoje = (datetime.now() - timedelta(hours=3)).strftime("%d-%b-%Y")
@@ -91,7 +97,7 @@ def buscar_emails(mail):
                 continue
     return lista
 
-# --- GERAR RELATÓRIO (SEM EMAIL) ---
+# --- GERAR RELATÓRIO ---
 def gerar_relatorio():
     mail = conectar_gmail()
     if not mail:
@@ -127,7 +133,7 @@ def gerar_relatorio():
     st.session_state['slz'] = analisar(slz)
     st.session_state['bel'] = analisar(bel, True)
 
-# --- EMAIL ---
+# --- ENVIAR EMAIL ---
 def enviar_email():
     if 'slz' not in st.session_state:
         return
@@ -135,7 +141,7 @@ def enviar_email():
     try:
         msg = MIMEMultipart()
         msg["From"] = EMAIL_USER
-        msg["To"] = DESTINO
+        msg["To"] = ", ".join(DESTINOS)
         msg["Subject"] = "Monitor Prospects - Status"
 
         def linhas(lista):
@@ -171,7 +177,7 @@ def enviar_email():
         server.send_message(msg)
         server.quit()
 
-        st.success("📧 Email enviado!")
+        st.success("📧 Email enviado para todos os destinatários!")
 
     except Exception as e:
         st.error(f"Erro email: {e}")
