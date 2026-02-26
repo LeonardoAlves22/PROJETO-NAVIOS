@@ -24,8 +24,8 @@ PORTOS_IDENTIFICADORES = {
     "VDC": ["VILA DO CONDE", "VDC", "BARCARENA"]
 }
 
-# Auto-refresh a cada 1 minuto para checar o horário de Brasília
-st_autorefresh(interval=60000, key="auto_disparo_vFinal")
+# Auto-refresh para manter o script ativo e checar horários de disparo
+st_autorefresh(interval=60000, key="auto_disparo_v7")
 
 # --- FUNÇÕES DE APOIO ---
 def enviar_email_html(html_conteudo, hora_ref):
@@ -41,7 +41,7 @@ def enviar_email_html(html_conteudo, hora_ref):
             server.send_message(msg)
         return True
     except Exception as e:
-        st.error(f"Falha no envio do e-mail: {e}")
+        st.error(f"Erro SMTP: {e}")
         return False
 
 def limpar_nome_navio(nome_bruto):
@@ -61,101 +61,4 @@ def limpar_nome_navio(nome_bruto):
 def identificar_porto_na_lista(nome_bruto):
     nome_up = nome_bruto.upper()
     if "BELEM" in nome_up: return "BEL"
-    if "VILA DO CONDE" in nome_up or "VDC" in nome_up: return "VDC"
-    return None
-
-def selecionar_pasta_todos(mail):
-    # O Gmail Corporativo usa esses nomes técnicos para "Todos os e-mails"
-    pastas = ['"[Gmail]/All Mail"', '"[Gmail]/Todos os e-mails"', 'INBOX']
-    for p in pastas:
-        status, _ = mail.select(p, readonly=True)
-        if status == 'OK': return True
-    return False
-
-def buscar_dados_email():
-    try:
-        mail = imaplib.IMAP4_SSL("imap.gmail.com")
-        mail.login(EMAIL_USER, EMAIL_PASS)
-        
-        if not selecionar_pasta_todos(mail):
-            mail.logout()
-            return [], [], [], (datetime.now() - timedelta(hours=3))
-
-        # Busca e-mail da lista de navios base
-        _, messages = mail.search(None, '(SUBJECT "LISTA NAVIOS")')
-        if not messages[0]: 
-            mail.logout()
-            return [], [], [], (datetime.now() - timedelta(hours=3))
-        
-        ultimo_id = messages[0].split()[-1]
-        _, data = mail.fetch(ultimo_id, '(RFC822)')
-        msg_raw = email.message_from_bytes(data[0][1])
-        
-        corpo = ""
-        if msg_raw.is_multipart():
-            for part in msg_raw.walk():
-                if part.get_content_type() == "text/plain":
-                    corpo = part.get_payload(decode=True).decode(errors='ignore')
-                    break
-        else: corpo = msg_raw.get_payload(decode=True).decode(errors='ignore')
-        
-        corpo_limpo = re.split(r'Best regards|Regards', corpo, flags=re.IGNORECASE)[0]
-        partes = re.split(r'BELEM:', corpo_limpo, flags=re.IGNORECASE)
-        
-        # Correção da linha 105 (colchetes fechados corretamente)
-        slz_lista = [n.strip() for n in partes[0].replace('SLZ:', '').split('\n') if n.strip() and "SLZ:" not in n.upper()]
-        bel_lista = [n.strip() for n in partes[1].split('\n') if n.strip()] if len(partes) > 1 else []
-        
-        agora_brasil = datetime.now() - timedelta(hours=3)
-        hoje_str = agora_brasil.strftime("%d-%b-%Y")
-        corte_tarde = agora_brasil.replace(hour=14, minute=0, second=0, microsecond=0)
-        
-        # Busca e-mails de atualização (Prospects/Notice) recebidos hoje
-        _, ids = mail.search(None, f'(SINCE "{hoje_str}")')
-        emails_encontrados = []
-        if ids[0]:
-            for e_id in ids[0].split():
-                _, data = mail.fetch(e_id, '(BODY[HEADER.FIELDS (SUBJECT DATE FROM)])')
-                msg = email.message_from_bytes(data[0][1])
-                data_envio = email.utils.parsedate_to_datetime(msg.get("Date")).replace(tzinfo=None)
-                subj = "".join(str(c.decode(ch or 'utf-8', errors='ignore') if isinstance(c, bytes) else c) for c, ch in decode_header(msg.get("Subject", ""))).upper()
-                emails_encontrados.append({"subj": subj, "from": (msg.get("From") or "").lower(), "date": data_envio})
-        
-        mail.logout()
-        return slz_lista, bel_lista, emails_encontrados, corte_tarde
-    except Exception as e:
-        st.error(f"Erro técnico: {e}")
-        return [], [], [], (datetime.now() - timedelta(hours=3))
-
-def processar_e_enviar():
-    slz_bruto, bel_bruto, e_db, corte = buscar_dados_email()
-    agora_br = datetime.now() - timedelta(hours=3)
-    hora_ref = agora_br.strftime('%H:%M')
-    
-    if not slz_bruto and not bel_bruto: return [], []
-
-    res_slz, res_bel = [], []
-    for lista, rems, target in [(slz_bruto, REM_SLZ, res_slz), (bel_bruto, REM_BEL, res_bel)]:
-        for n_bruto in lista:
-            n_exibicao = limpar_nome_navio(n_bruto)
-            n_busca = n_exibicao.split(' (')[0]
-            p_esp = identificar_porto_na_lista(n_bruto)
-            m_g = [em for em in e_db if n_busca in em["subj"] and any(r in em["from"] for r in rems) and any(k in em["subj"] for k in KEYWORDS)]
-            if p_esp: m_g = [em for em in m_g if any(tag in em["subj"] for tag in PORTOS_IDENTIFICADORES[p_esp])]
-            m_t = [em for em in m_g if em["date"] >= corte]
-            target.append({"Navio": n_exibicao, "Manhã": "✅" if m_g else "❌", "Tarde": "✅" if m_t else "❌"})
-
-    # --- MONTAGEM DO HTML DO EMAIL ---
-    html = f"""
-    <html>
-    <body style="font-family: Arial, sans-serif;">
-        <h2 style="color: #003366;">Resumo Operacional - {agora_br.strftime('%d/%m/%Y')} às {hora_ref}</h2>
-        <table border="0" cellpadding="0" cellspacing="0" style="width: 100%; max-width: 900px;">
-            <tr>
-                <td style="width: 48%; vertical-align: top; padding-right: 20px;">
-                    <h3 style="background-color: #003366; color: white; padding: 10px; font-size: 14px;">SÃO LUÍS</h3>
-                    <table border="1" style="border-collapse: collapse; width: 100%; font-size: 12px;">
-                        <tr style="background-color: #eee;"><th>Navio</th><th>Manhã</th><th>Tarde</th></tr>
-    """
-    for n in res_slz:
-        html += f"<tr><td>{n['Navio
+    if "VILA DO CONDE" in nome_up or "VDC" in nome
