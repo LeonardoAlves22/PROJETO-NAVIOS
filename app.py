@@ -15,31 +15,28 @@ REMS = {
 
 st_autorefresh(interval=60000, key="monitor_fast")
 
-# --- CONEXÃO GMAIL (CORRIGIDA) ---
+# --- CONEXÃO GMAIL ---
 def conectar_gmail():
     try:
         mail = imaplib.IMAP4_SSL("imap.gmail.com")
         mail.login(EMAIL_USER, EMAIL_PASS)
 
-        # Tenta abrir All Mail
         status, _ = mail.select('"[Gmail]/All Mail"', readonly=True)
-
         if status != "OK":
-            # fallback para INBOX
             status, _ = mail.select("INBOX", readonly=True)
             if status != "OK":
                 return None
 
         return mail
-
     except Exception as e:
         st.error(f"Erro ao conectar Gmail: {e}")
         return None
 
-# --- LIMPEZA DE NOME ---
+# --- LIMPEZA NOME NAVIO (CORRIGIDA) ---
 def limpar_nome_simples(txt):
-    n = re.sub(r'^MV\s+|^M/V\s+|^MT\s+|^M/T\s+', '', txt.strip(), flags=re.IGNORECASE)
-    n = re.split(r'\s|\-|\(|\/', n)[0]
+    n = re.sub(r'^(MV|M/V|MT|M/T)\s+', '', txt.strip(), flags=re.IGNORECASE)
+    n = re.sub(r'\(.*?\)', '', n)
+    n = re.sub(r'\s+', ' ', n)
     return n.strip().upper()
 
 # --- OBTER LISTA NAVIOS ---
@@ -73,7 +70,7 @@ def obter_lista_navios(mail):
 
     return slz, bel
 
-# --- BUSCAR EMAILS OTIMIZADO ---
+# --- BUSCAR EMAILS ---
 def buscar_emails_hoje(mail):
     hoje = (datetime.now() - timedelta(hours=3)).strftime("%d-%b-%Y")
 
@@ -88,7 +85,6 @@ def buscar_emails_hoje(mail):
     lista = []
     if data[0]:
         ids = data[0].split()[-200:]
-
         if ids:
             _, dados = mail.fetch(",".join(ids),
                                   '(BODY.PEEK[HEADER.FIELDS (SUBJECT DATE FROM)])')
@@ -117,17 +113,6 @@ def buscar_emails_hoje(mail):
 
     return lista
 
-# --- INDEXADOR ---
-def indexar_emails(db):
-    index = {}
-    for e in db:
-        for palavra in e["subj"].split():
-            palavra = palavra.strip()
-            if palavra not in index:
-                index[palavra] = []
-            index[palavra].append(e)
-    return index
-
 # --- EXECUÇÃO PRINCIPAL ---
 def executar():
     mail = conectar_gmail()
@@ -138,8 +123,6 @@ def executar():
     db_emails = buscar_emails_hoje(mail)
     mail.logout()
 
-    index_emails = indexar_emails(db_emails)
-
     agora_br = datetime.now() - timedelta(hours=3)
     corte = agora_br.replace(hour=14, minute=0, second=0)
 
@@ -148,7 +131,7 @@ def executar():
     res_slz = []
     for n in slz_bruto:
         nome_core = limpar_nome_simples(n)
-        m_g = index_emails.get(nome_core, [])
+        m_g = [e for e in db_emails if nome_core in e["subj"] and any(r in e["from"] for r in REMS["SLZ"])]
         m_t = [e for e in m_g if e["date"] >= corte]
 
         res_slz.append({
@@ -166,7 +149,7 @@ def executar():
         if nomes_bel_core.count(nome_core) > 1:
             exibicao = f"{nome_core} (VDC)" if is_vdc_lista else f"{nome_core} (BELEM)"
 
-        m_g = index_emails.get(nome_core, [])
+        m_g = [e for e in db_emails if nome_core in e["subj"] and any(r in e["from"] for r in REMS["BEL"])]
         m_t = [e for e in m_g if e["date"] >= corte]
 
         res_bel.append({
@@ -178,9 +161,9 @@ def executar():
     st.session_state['res_slz'] = res_slz
     st.session_state['res_bel'] = res_bel
 
-# --- STREAMLIT ---
+# --- STREAMLIT UI ---
 st.set_page_config(page_title="Monitor WS FAST", layout="wide")
-st.title("🚢 Monitor Wilson Sons 3.0 (Fast Mode)")
+st.title("🚢 Monitor Wilson Sons 3.1")
 
 agora_br = datetime.now() - timedelta(hours=3)
 st.metric("Horário Brasília", agora_br.strftime("%H:%M"))
