@@ -92,4 +92,123 @@ def buscar_dados_email():
         msg_raw = email.message_from_bytes(data[0][1])
         
         corpo = ""
-        if msg_
+        if msg_raw.is_multipart():
+            for part in msg_raw.walk():
+                if part.get_content_type() == "text/plain":
+                    corpo = part.get_payload(decode=True).decode(errors='ignore')
+                    break
+        else:
+            corpo = msg_raw.get_payload(decode=True).decode(errors='ignore')
+        
+        corpo_limpo = re.split(r'Best regards|Regards', corpo, flags=re.IGNORECASE)[0]
+        partes = re.split(r'BELEM:', corpo_limpo, flags=re.IGNORECASE)
+        
+        slz_lista = [n.strip() for n in partes[0].replace('SLZ:', '').split('\n') if n.strip() and "SLZ:" not in n.upper()]
+        bel_lista = [n.strip() for n in partes[1].split('\n') if n.strip()] if len(partes) > 1 else []
+        
+        # 2. Busca e-mails de atualização (Prospects)
+        agora_brasil = datetime.now() - timedelta(hours=3)
+        hoje_str = agora_brasil.strftime("%d-%b-%Y")
+        corte_tarde = agora_brasil.replace(hour=14, minute=0, second=0, microsecond=0)
+        
+        _, ids = mail.search(None, f'(SINCE "{hoje_str}")')
+        emails_encontrados = []
+        if ids[0]:
+            for e_id in ids[0].split():
+                try:
+                    _, data = mail.fetch(e_id, '(BODY[HEADER.FIELDS (SUBJECT DATE FROM)])')
+                    msg = email.message_from_bytes(data[0][1])
+                    data_envio = email.utils.parsedate_to_datetime(msg.get("Date")).replace(tzinfo=None)
+                    subj = "".join(str(c.decode(ch or 'utf-8', errors='ignore') if isinstance(c, bytes) else c) for c, ch in decode_header(msg.get("Subject", ""))).upper()
+                    emails_encontrados.append({"subj": subj, "from": (msg.get("From") or "").lower(), "date": data_envio})
+                except:
+                    continue
+        
+        mail.logout()
+        return slz_lista, bel_lista, emails_encontrados, corte_tarde
+    except Exception as e:
+        st.error(f"Erro na conexão de e-mail: {e}")
+        return [], [], [], (datetime.now() - timedelta(hours=3))
+
+def processar_e_enviar():
+    slz_bruto, bel_bruto, e_db, corte = buscar_dados_email()
+    agora_br = datetime.now() - timedelta(hours=3)
+    hora_ref = agora_br.strftime('%H:%M')
+    
+    if not slz_bruto and not bel_bruto: return [], []
+
+    res_slz, res_bel = [], []
+    for lista, rems, target in [(slz_bruto, REM_SLZ, res_slz), (bel_bruto, REM_BEL, res_bel)]:
+        for n_bruto in lista:
+            n_exibicao = limpar_nome_navio(n_bruto)
+            n_busca = n_exibicao.split(' (')[0]
+            p_esp = identificar_porto_na_lista(n_bruto)
+            
+            m_g = [em for em in e_db if n_busca in em["subj"] and any(r in em["from"] for r in rems) and any(k in em["subj"] for k in KEYWORDS)]
+            if p_esp: m_g = [em for em in m_g if any(tag in em["subj"] for tag in PORTOS_IDENTIFICADORES[p_esp])]
+            m_t = [em for em in m_g if em["date"] >= corte]
+            
+            target.append({"Navio": n_exibicao, "Manhã": "✅" if m_g else "❌", "Tarde": "✅" if m_t else "❌"})
+
+    # --- MONTAGEM DO HTML DO E-MAIL ---
+    html_corpo = f"""
+    <html>
+    <body style="font-family: Arial, sans-serif;">
+        <h2 style="color: #003366;">Resumo Operacional - {agora_br.strftime('%d/%m/%Y')} às {hora_ref}</h2>
+        <table border="0" cellpadding="0" cellspacing="0" style="width: 100%; max-width: 900px;">
+            <tr>
+                <td style="width: 48%; vertical-align: top; padding-right: 20px;">
+                    <h3 style="background-color: #003366; color: white; padding: 10px; font-size: 14px;">SÃO LUÍS</h3>
+                    <table border="1" style="border-collapse: collapse; width: 100%; font-size: 12px;">
+                        <tr style="background-color: #eee;"><th>Navio</th><th>Manhã</th><th>Tarde</th></tr>
+    """
+    for n in res_slz:
+        html_corpo += f"<tr><td>{n['Navio']}</td><td align='center'>{n['Manhã']}</td><td align='center'>{n['Tarde']}</td></tr>"
+    
+    html_corpo += """
+                    </table>
+                </td>
+                <td style="width: 48%; vertical-align: top; padding-left: 20px;">
+                    <h3 style="background-color: #003366; color: white; padding: 10px; font-size: 14px;">BELÉM / VDC</h3>
+                    <table border="1" style="border-collapse: collapse; width: 100%; font-size: 12px;">
+                        <tr style="background-color: #eee;"><th>Navio</th><th>Manhã</th><th>Tarde</th></tr>
+    """
+    for n in res_bel:
+        html_corpo += f"<tr><td>{n['Navio']}</td><td align='center'>{n['Manhã']}</td><td align='center'>{n['Tarde']}</td></tr>"
+    
+    html_corpo += """
+                    </table>
+                </td>
+            </tr>
+        </table>
+        <p style='font-size:10px; color:grey;'>Enviado via Monitor Wilson Sons</p>
+    </body>
+    </html>
+    """
+    
+    enviar_email_html(html_corpo, hora_ref)
+    return res_slz, res_bel
+
+# --- INTERFACE ---
+st.set_page_config(page_title="Monitor WS", layout="wide")
+st.title("🚢 Monitor Wilson Sons - Corporativo")
+
+agora_br = datetime.now() - timedelta(hours=3)
+hora_minuto = agora_br.strftime("%H:%M")
+st.metric("Fuso Horário Brasília", hora_minuto)
+
+if hora_minuto in HORARIOS_DISPARO:
+    if "ultimo_envio" not in st.session_state or st.session_state.ultimo_envio != hora_minuto:
+        processar_e_enviar()
+        st.session_state.ultimo_envio = hora_minuto
+
+if st.button("🔄 Gerar Relatório Manual e Enviar E-mail"):
+    with st.status("Processando dados corporativos..."):
+        r_slz, r_bel = processar_e_enviar()
+        if r_slz or r_bel:
+            st.session_state['res_slz_v'], st.session_state['res_bel_v'] = r_slz, r_bel
+
+if 'res_slz_v' in st.session_state:
+    c1, c2 = st.columns(2)
+    with c1: st.subheader("SÃO LUÍS"); st.table(st.session_state.res_slz_v)
+    with c2: st.subheader("BELÉM / VDC"); st.table(st.session_state.res_bel_v)
