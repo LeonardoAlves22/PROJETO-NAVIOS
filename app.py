@@ -15,7 +15,7 @@ REMS = {
 
 st_autorefresh(interval=60000, key="monitor_fast")
 
-# --- CONEXÃO ---
+# --- CONEXÃO GMAIL ---
 def conectar_gmail():
     try:
         mail = imaplib.IMAP4_SSL("imap.gmail.com")
@@ -69,12 +69,11 @@ def obter_lista_navios(mail):
 
     return slz, bel
 
-# --- BUSCAR EMAILS HOJE (CORRIGIDO) ---
+# --- BUSCAR EMAILS HOJE (FIX FETCH) ---
 def buscar_emails_hoje(mail):
     hoje = (datetime.now() - timedelta(hours=3)).strftime("%d-%b-%Y")
 
     remetentes = [r for grupo in REMS.values() for r in grupo]
-
     if not remetentes:
         return []
 
@@ -88,31 +87,28 @@ def buscar_emails_hoje(mail):
     lista = []
     if data[0]:
         ids = data[0].split()[-300:]
-        if ids:
-            _, dados = mail.fetch(",".join(ids),
-                                  '(BODY.PEEK[HEADER.FIELDS (SUBJECT DATE FROM)])')
 
-            for i in range(0, len(dados), 2):
-                try:
-                    raw = dados[i][1]
-                    msg = email.message_from_bytes(raw)
+        for eid in ids:
+            try:
+                _, d = mail.fetch(eid, '(BODY.PEEK[HEADER.FIELDS (SUBJECT DATE FROM)])')
+                msg = email.message_from_bytes(d[0][1])
 
-                    subj = "".join(
-                        str(c.decode(ch or 'utf-8') if isinstance(c, bytes) else c)
-                        for c, ch in decode_header(msg.get("Subject", ""))
-                    ).upper()
+                subj = "".join(
+                    str(c.decode(ch or 'utf-8') if isinstance(c, bytes) else c)
+                    for c, ch in decode_header(msg.get("Subject", ""))
+                ).upper()
 
-                    envio = email.utils.parsedate_to_datetime(
-                        msg.get("Date")
-                    ).replace(tzinfo=None)
+                envio = email.utils.parsedate_to_datetime(
+                    msg.get("Date")
+                ).replace(tzinfo=None)
 
-                    lista.append({
-                        "subj": subj,
-                        "from": msg.get("From", "").lower(),
-                        "date": envio
-                    })
-                except:
-                    continue
+                lista.append({
+                    "subj": subj,
+                    "from": msg.get("From", "").lower(),
+                    "date": envio
+                })
+            except:
+                continue
 
     return lista
 
@@ -129,8 +125,6 @@ def executar():
     agora_br = datetime.now() - timedelta(hours=3)
     corte = agora_br.replace(hour=14, minute=0, second=0)
 
-    nomes_bel_core = [limpar_nome_simples(n) for n in bel_bruto]
-
     res_slz = []
     for n in slz_bruto:
         nome_core = limpar_nome_simples(n)
@@ -146,17 +140,11 @@ def executar():
     res_bel = []
     for n in bel_bruto:
         nome_core = limpar_nome_simples(n)
-        is_vdc_lista = any(x in n.upper() for x in ["VILA", "VDC", "BARCARENA"])
-
-        exibicao = nome_core
-        if nomes_bel_core.count(nome_core) > 1:
-            exibicao = f"{nome_core} (VDC)" if is_vdc_lista else f"{nome_core} (BELEM)"
-
         m_g = [e for e in db_emails if nome_core in e["subj"] and any(r in e["from"] for r in REMS["BEL"])]
         m_t = [e for e in m_g if e["date"] >= corte]
 
         res_bel.append({
-            "Navio": exibicao,
+            "Navio": nome_core,
             "Manhã": "✅" if m_g else "❌",
             "Tarde": "✅" if m_t else "❌"
         })
@@ -164,7 +152,7 @@ def executar():
     st.session_state['res_slz'] = res_slz
     st.session_state['res_bel'] = res_bel
 
-# --- STREAMLIT UI ---
+# --- STREAMLIT ---
 st.set_page_config(page_title="Monitor WS", layout="wide")
 st.title("🚢 Monitor Wilson Sons")
 
