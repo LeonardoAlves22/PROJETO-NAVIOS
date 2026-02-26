@@ -21,20 +21,31 @@ def conectar_gmail():
         st.error(f"Erro Gmail: {e}")
         return None
 
-# --- LIMPAR NOME ---
+# --- LIMPAR NOME NAVIO (VERSÃO FINAL) ---
 def limpar_nome(txt):
+    # Remove prefixos MV / M/V / MT
     n = re.sub(r'^(MV|M/V|MT|M/T)\s+', '', txt.strip(), flags=re.IGNORECASE)
-    n = re.split(r'\s-\s', n)[0]  # corta após hífen
+
+    # Remove tudo após hífen
+    n = re.split(r'\s-\s', n)[0]
+
+    # Remove VOY / V. / V número no final (ex: V.26062, V 26062, VOY 01)
+    n = re.sub(r'\s+(V|VOY)\.?\s*\d+.*$', '', n, flags=re.IGNORECASE)
+
+    # Remove conteúdo entre parênteses
     n = re.sub(r'\(.*?\)', '', n)
+
+    # Remove múltiplos espaços
     n = re.sub(r'\s+', ' ', n)
+
     return n.strip().upper()
 
-# --- EXTRAIR PORTO ENTRE PARÊNTESES ---
+# --- EXTRAIR PORTO ENTRE () ---
 def extrair_porto(txt):
     m = re.search(r'\((.*?)\)', txt)
     return m.group(1).strip().upper() if m else None
 
-# --- OBTER LISTA NAVIOS ---
+# --- LISTA NAVIOS ---
 def obter_lista_navios(mail):
     mail.select("INBOX", readonly=True)
     _, data = mail.search(None, '(SUBJECT "LISTA NAVIOS")')
@@ -66,6 +77,7 @@ def obter_lista_navios(mail):
 # --- BUSCAR EMAILS PROSPECT ---
 def buscar_emails(mail):
     mail.select(f'"{LABEL_PROSPECT}"', readonly=True)
+
     hoje = (datetime.now() - timedelta(hours=3)).strftime("%d-%b-%Y")
     _, data = mail.search(None, f'(SINCE "{hoje}")')
 
@@ -86,6 +98,7 @@ def buscar_emails(mail):
                 lista.append({"subj": subj, "date": envio})
             except:
                 continue
+
     return lista
 
 # --- EXECUTAR ---
@@ -107,7 +120,7 @@ def executar():
             nome_base = limpar_nome(item)
             porto = extrair_porto(item)
 
-            # Se for Belém e houver duplicidade
+            # Diferenciar navio repetido em Belém por porto
             if is_belem and nomes_base_bel.count(nome_base) > 1 and porto:
                 emails_navio = [
                     e for e in emails
