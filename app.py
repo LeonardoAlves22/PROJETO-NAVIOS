@@ -23,7 +23,6 @@ PORTOS_IDENTIFICADORES = {
 }
 
 # --- ATUALIZAÇÃO AUTOMÁTICA (1 minuto) ---
-# Isso mantém o script rodando para checar o horário do disparo
 st_autorefresh(interval=60000, key="datarefresh")
 
 # --- FUNÇÕES DE APOIO ---
@@ -41,7 +40,7 @@ def enviar_email_html(html_conteudo, hora_ref):
             server.send_message(msg)
         return True
     except Exception as e:
-        st.error(f"Erro no envio automático: {e}")
+        st.error(f"Erro no envio: {e}")
         return False
 
 def limpar_nome_navio(nome_bruto):
@@ -120,30 +119,33 @@ def processar_e_enviar():
     <html>
     <body style="font-family: Arial, sans-serif;">
         <h2 style="color: #003366;">Resumo Operacional - {agora_br.strftime('%d/%m/%Y')} às {hora_ref}</h2>
-        <div style="display: flex; gap: 20px;">
-            <div style="flex: 1;">
-                <h3 style="background-color: #003366; color: white; padding: 5px;">FILIAL SÃO LUÍS</h3>
-                <table border="1" style="border-collapse: collapse; width: 100%;">
-                    <tr style="background-color: #f2f2f2;"><th>Navio</th><th>M</th><th>T</th></tr>
+        <table border="0" cellpadding="0" cellspacing="0" style="width: 100%; max-width: 900px;">
+            <tr>
+                <td style="width: 48%; vertical-align: top; padding-right: 20px;">
+                    <h3 style="background-color: #003366; color: white; padding: 8px; margin-bottom: 5px; font-size: 14px;">FILIAL SÃO LUÍS</h3>
+                    <table border="1" style="border-collapse: collapse; width: 100%; font-size: 13px;">
+                        <tr style="background-color: #f2f2f2;"><th>Navio</th><th>Manhã</th><th>Tarde</th></tr>
     """
     for n in res_slz:
-        html += f"<tr><td>{n['Navio']}</td><td align='center'>{n['Manhã']}</td><td align='center'>{n['Tarde']}</td></tr>"
+        html += f"<tr><td style='padding: 4px;'>{n['Navio']}</td><td align='center'>{n['Manhã']}</td><td align='center'>{n['Tarde']}</td></tr>"
     
     html += """
-                </table>
-            </div>
-            <div style="flex: 1;">
-                <h3 style="background-color: #003366; color: white; padding: 5px;">FILIAL BELÉM / VDC</h3>
-                <table border="1" style="border-collapse: collapse; width: 100%;">
-                    <tr style="background-color: #f2f2f2;"><th>Navio</th><th>M</th><th>T</th></tr>
+                    </table>
+                </td>
+                <td style="width: 48%; vertical-align: top; padding-left: 20px;">
+                    <h3 style="background-color: #003366; color: white; padding: 8px; margin-bottom: 5px; font-size: 14px;">FILIAL BELÉM / VDC</h3>
+                    <table border="1" style="border-collapse: collapse; width: 100%; font-size: 13px;">
+                        <tr style="background-color: #f2f2f2;"><th>Navio</th><th>Manhã</th><th>Tarde</th></tr>
     """
     for n in res_bel:
-        html += f"<tr><td>{n['Navio']}</td><td align='center'>{n['Manhã']}</td><td align='center'>{n['Tarde']}</td></tr>"
+        html += f"<tr><td style='padding: 4px;'>{n['Navio']}</td><td align='center'>{n['Manhã']}</td><td align='center'>{n['Tarde']}</td></tr>"
     
     html += """
-                </table>
-            </div>
-        </div>
+                    </table>
+                </td>
+            </tr>
+        </table>
+        <br>
         <p style="font-size: 10px; color: grey;">Relatório Automático - Wilson Sons</p>
     </body>
     </html>
