@@ -24,8 +24,8 @@ PORTOS_IDENTIFICADORES = {
     "VDC": ["VILA DO CONDE", "VDC", "BARCARENA"]
 }
 
-# --- AUTO-REFRESH (Mantém o app vivo para os disparos automáticos) ---
-st_autorefresh(interval=60000, key="auto_disparo_v5")
+# Auto-refresh a cada 1 minuto para checar o relógio
+st_autorefresh(interval=60000, key="auto_disparo_v6")
 
 # --- FUNÇÕES DE APOIO ---
 def enviar_email_html(html_conteudo, hora_ref):
@@ -65,6 +65,7 @@ def identificar_porto_na_lista(nome_bruto):
     return None
 
 def selecionar_pasta_todos(mail):
+    """Tenta selecionar a pasta correta do Gmail Corporativo"""
     pastas = ['"[Gmail]/All Mail"', '"[Gmail]/Todos os e-mails"', 'INBOX']
     for p in pastas:
         status, _ = mail.select(p, readonly=True)
@@ -75,4 +76,30 @@ def buscar_dados_email():
     try:
         mail = imaplib.IMAP4_SSL("imap.gmail.com")
         mail.login(EMAIL_USER, EMAIL_PASS)
-        if not selecionar_pasta_todos(
+        
+        # AQUI ESTAVA O ERRO DE PARÊNTESE:
+        if not selecionar_pasta_todos(mail):
+            mail.logout()
+            return [], [], [], (datetime.now() - timedelta(hours=3))
+
+        # Busca e-mail da lista
+        _, messages = mail.search(None, '(SUBJECT "LISTA NAVIOS")')
+        if not messages[0]: 
+            mail.logout()
+            return [], [], [], (datetime.now() - timedelta(hours=3))
+        
+        ultimo_id = messages[0].split()[-1]
+        _, data = mail.fetch(ultimo_id, '(RFC822)')
+        msg_raw = email.message_from_bytes(data[0][1])
+        
+        corpo = ""
+        if msg_raw.is_multipart():
+            for part in msg_raw.walk():
+                if part.get_content_type() == "text/plain":
+                    corpo = part.get_payload(decode=True).decode(errors='ignore')
+                    break
+        else: corpo = msg_raw.get_payload(decode=True).decode(errors='ignore')
+        
+        corpo_limpo = re.split(r'Best regards|Regards', corpo, flags=re.IGNORECASE)[0]
+        partes = re.split(r'BELEM:', corpo_limpo, flags=re.IGNORECASE)
+        slz_lista = [n.strip() for n
