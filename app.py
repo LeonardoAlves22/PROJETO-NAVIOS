@@ -99,4 +99,107 @@ def buscar_dados_email():
                 msg = email.message_from_bytes(data[0][1])
                 data_envio = email.utils.parsedate_to_datetime(msg.get("Date")).replace(tzinfo=None)
                 if data_envio >= inicio_do_dia:
-                    subj = "".join(str(c.decode(ch or
+                    subj = "".join(str(c.decode(ch or 'utf-8', errors='ignore') if isinstance(c, bytes) else c) for c, ch in decode_header(msg.get("Subject", ""))).upper()
+                    emails_encontrados.append({"subj": subj, "from": (msg.get("From") or "").lower(), "date": data_envio})
+        mail.logout()
+        return slz_lista, bel_lista, emails_encontrados, corte_tarde
+    except Exception as e:
+        st.error(f"Erro na leitura do e-mail corporativo: {e}")
+        return [], [], [], (datetime.now() - timedelta(hours=3))
+
+# --- LÓGICA DE PROCESSAMENTO E FORMATAÇÃO HTML ---
+def processar_e_enviar():
+    slz_bruto, bel_bruto, e_db, corte = buscar_dados_email()
+    agora_br = datetime.now() - timedelta(hours=3)
+    hora_ref = agora_br.strftime('%H:%M')
+    
+    res_slz, res_bel = [], []
+    for lista, rems, target in [(slz_bruto, REM_SLZ, res_slz), (bel_bruto, REM_BEL, res_bel)]:
+        for n_bruto in lista:
+            n_limpo = limpar_nome_navio(n_bruto)
+            p_esp = identificar_porto_na_lista(n_bruto)
+            m_g = [em for em in e_db if n_limpo in em["subj"] and any(r in em["from"] for r in rems) and any(k in em["subj"] for k in KEYWORDS)]
+            if p_esp: m_g = [em for em in m_g if any(tag in em["subj"] for tag in PORTOS_IDENTIFICADORES[p_esp])]
+            m_t = [em for em in m_g if em["date"] >= corte]
+            target.append({"Navio": n_limpo, "Manhã": "✅" if m_g else "❌", "Tarde": "✅" if m_t else "❌"})
+
+    html = f"""
+    <html>
+    <body style="font-family: Arial, sans-serif;">
+        <h2 style="color: #003366;">Resumo Operacional - {agora_br.strftime('%d/%m/%Y')} às {hora_ref}</h2>
+        <table border="0" cellpadding="0" cellspacing="0" style="width: 100%; max-width: 900px;">
+            <tr>
+                <td style="width: 48%; vertical-align: top; padding-right: 20px;">
+                    <h3 style="background-color: #003366; color: white; padding: 8px; margin-bottom: 5px; font-size: 14px;">FILIAL SÃO LUÍS</h3>
+                    <table border="1" style="border-collapse: collapse; width: 100%; font-size: 13px;">
+                        <tr style="background-color: #f2f2f2;"><th>Navio</th><th>Manhã</th><th>Tarde</th></tr>
+    """
+    for n in res_slz:
+        html += f"<tr><td style='padding: 4px;'>{n['Navio']}</td><td align='center'>{n['Manhã']}</td><td align='center'>{n['Tarde']}</td></tr>"
+    
+    html += """
+                    </table>
+                </td>
+                <td style="width: 48%; vertical-align: top; padding-left: 20px;">
+                    <h3 style="background-color: #003366; color: white; padding: 8px; margin-bottom: 5px; font-size: 14px;">FILIAL BELÉM / VDC</h3>
+                    <table border="1" style="border-collapse: collapse; width: 100%; font-size: 13px;">
+                        <tr style="background-color: #f2f2f2;"><th>Navio</th><th>Manhã</th><th>Tarde</th></tr>
+    """
+    for n in res_bel:
+        html += f"<tr><td style='padding: 4px;'>{n['Navio']}</td><td align='center'>{n['Manhã']}</td><td align='center'>{n['Tarde']}</td></tr>"
+    
+    html += """
+                    </table>
+                </td>
+            </tr>
+        </table>
+        <br>
+        <p style="font-size: 10px; color: grey;">Relatório Automático - Wilson Sons</p>
+    </body>
+    </html>
+    """
+    enviar_email_html(html, hora_ref)
+    return res_slz, res_bel
+
+# --- INTERFACE STREAMLIT ---
+st.set_page_config(page_title="Gestão de Navios WS", layout="wide")
+st.title("🚢 Monitor Wilson Sons - Corporativo")
+
+agora_br = datetime.now() - timedelta(hours=3)
+hora_minuto = agora_br.strftime("%H:%M")
+
+st.metric("Horário Brasília", hora_minuto)
+
+if hora_minuto in HORARIOS_DISPARO:
+    if "ultimo_envio" not in st.session_state or st.session_state.ultimo_envio != hora_minuto:
+        r_slz, r_bel = processar_e_enviar()
+        st.session_state.ultimo_envio = hora_minuto
+        st.toast(f"E-mail automático enviado!")
+
+if st.button("🔄 Executar Agora e Enviar E-mail"):
+    r_slz, r_bel = processar_e_enviar()
+    st.success("Relatório manual enviado!")
+    st.session_state['res_slz_v'] = r_slz
+    st.session_state['res_bel_v'] = r_bel
+
+if 'res_slz_v' in st.session_state:
+    c1, c2 = st.columns(2)
+    c1.subheader("SÃO LUÍS")
+    c1.table(st.session_state.res_slz_v)
+    c2.subheader("BELÉM / VDC")
+    c2.table(st.session_state.res_bel_v)
+
+# --- SIDEBAR PARA O ROBÔ (VISITADOR) ---
+st.sidebar.divider()
+st.sidebar.subheader("🔒 Acesso Visitador WS")
+ws_user = st.sidebar.text_input("Login WS")
+ws_pass = st.sidebar.text_input("Senha WS", type="password")
+
+if st.sidebar.button("🚀 Sincronizar Checklists"):
+    if 'res_slz_v' not in st.session_state:
+        st.error("Gere o relatório primeiro.")
+    else:
+        from ws_robot import extrair_checklist_ws
+        # O robô agora usa automaticamente as mesmas credenciais corporativas configuradas no topo
+        # para ler o código MFA
+        pass
