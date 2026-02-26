@@ -24,7 +24,8 @@ PORTOS_IDENTIFICADORES = {
     "VDC": ["VILA DO CONDE", "VDC", "BARCARENA"]
 }
 
-st_autorefresh(interval=60000, key="auto_disparo_v3")
+# Mantém o app vivo para checar os horários
+st_autorefresh(interval=60000, key="auto_disparo_v4")
 
 # --- FUNÇÕES DE APOIO ---
 def enviar_email_html(html_conteudo, hora_ref):
@@ -40,30 +41,22 @@ def enviar_email_html(html_conteudo, hora_ref):
             server.send_message(msg)
         return True
     except Exception as e:
-        st.error(f"Erro no envio: {e}")
+        st.error(f"Erro no envio SMTP: {e}")
         return False
 
 def limpar_nome_navio(nome_bruto):
     if not nome_bruto: return ""
-    
-    # 1. Identifica se tem menção a porto entre parênteses para preservar
+    nome_up = nome_bruto.upper()
     sufixo_porto = ""
-    if "(VILA DO CONDE)" in nome_bruto.upper() or "(VDC)" in nome_bruto.upper():
+    if "(VILA DO CONDE)" in nome_up or "(VDC)" in nome_up:
         sufixo_porto = " (VILA DO CONDE)"
-    elif "(BELEM)" in nome_bruto.upper():
+    elif "(BELEM)" in nome_up:
         sufixo_porto = " (BELEM)"
 
-    # 2. Remove prefixos comuns (MV, MT, etc)
     nome = re.sub(r'^MV\s+|^M/V\s+|^MT\s+|^M/T\s+', '', nome_bruto.strip(), flags=re.IGNORECASE)
-    
-    # 3. Remove tudo que está entre parênteses (temporariamente) para limpar o nome
     nome = re.sub(r'\(.*?\)', '', nome)
-    
-    # 4. Remove termos de viagem (V.01, V. 2024, etc) SEM cortar nomes compostos como CASTLE POINT
-    # Agora ele só corta se encontrar " V." ou " V0" ou "/" isolado
+    # Ajuste para nomes compostos: só quebra se encontrar V. ou / ou dígito de viagem
     nome = re.split(r'\sV\.|\sV\d|/|–', nome, flags=re.IGNORECASE)[0]
-    
-    # 5. Retorna o nome limpo + o sufixo do porto se existir
     return nome.strip().upper() + sufixo_porto
 
 def identificar_porto_na_lista(nome_bruto):
@@ -72,14 +65,28 @@ def identificar_porto_na_lista(nome_bruto):
     if "VILA DO CONDE" in nome_up or "VDC" in nome_up: return "VDC"
     return None
 
+def selecionar_pasta_todos(mail):
+    """Tenta selecionar a pasta 'Todos os e-mails' em diferentes idiomas técnicos"""
+    pastas = ['"[Gmail]/All Mail"', '"[Gmail]/Todos os e-mails"', 'INBOX']
+    for p in pastas:
+        status, _ = mail.select(p, readonly=True)
+        if status == 'OK':
+            return True
+    return False
+
 def buscar_dados_email():
     try:
         mail = imaplib.IMAP4_SSL("imap.gmail.com")
         mail.login(EMAIL_USER, EMAIL_PASS)
-        mail.select('"[Gmail]/All Mail"', readonly=True)
         
+        # O PONTO CRÍTICO: Selecionar a pasta antes do SEARCH
+        if not selecionar_pasta_todos(mail):
+            st.error("Erro: Não foi possível acessar a pasta de mensagens do Gmail.")
+            return [], [], [], (datetime.now() - timedelta(hours=3))
+
+        # Busca a LISTA NAVIOS
         _, messages = mail.search(None, '(SUBJECT "LISTA NAVIOS")')
-        if not messages[0]: 
+        if not messages[0]:
             mail.logout()
             return [], [], [], (datetime.now() - timedelta(hours=3))
         
@@ -97,14 +104,15 @@ def buscar_dados_email():
         
         corpo_limpo = re.split(r'Best regards|Regards', corpo, flags=re.IGNORECASE)[0]
         partes = re.split(r'BELEM:', corpo_limpo, flags=re.IGNORECASE)
-        
         slz_lista = [n.strip() for n in partes[0].replace('SLZ:', '').split('\n') if n.strip() and "SLZ:" not in n.upper()]
         bel_lista = [n.strip() for n in partes[1].split('\n') if n.strip()] if len(partes) > 1 else []
         
+        # Configura datas Brasil
         agora_brasil = datetime.now() - timedelta(hours=3)
         hoje_str = agora_brasil.strftime("%d-%b-%Y")
         corte_tarde = agora_brasil.replace(hour=14, minute=0, second=0, microsecond=0)
         
+        # Busca atualizações do dia para o status Manhã/Tarde
         _, ids = mail.search(None, f'(SINCE "{hoje_str}")')
         emails_encontrados = []
         if ids[0]:
@@ -131,19 +139,16 @@ def processar_e_enviar():
     res_slz, res_bel = [], []
     for lista, rems, target in [(slz_bruto, REM_SLZ, res_slz), (bel_bruto, REM_BEL, res_bel)]:
         for n_bruto in lista:
-            n_limpo_completo = limpar_nome_navio(n_bruto) # Nome com Porto
-            n_para_busca = n_limpo_completo.split(' (')[0] # Nome apenas para busca no e-mail
-            
+            n_exibicao = limpar_nome_navio(n_bruto)
+            n_busca = n_exibicao.split(' (')[0] # Busca sem o porto no parêntese
             p_esp = identificar_porto_na_lista(n_bruto)
             
-            # Busca e-mails usando o nome sem o sufixo do porto para maior compatibilidade
-            m_g = [em for em in e_db if n_para_busca in em["subj"] and any(r in em["from"] for r in rems) and any(k in em["subj"] for k in KEYWORDS)]
+            m_g = [em for em in e_db if n_busca in em["subj"] and any(r in em["from"] for r in rems) and any(k in em["subj"] for k in KEYWORDS)]
             if p_esp: m_g = [em for em in m_g if any(tag in em["subj"] for tag in PORTOS_IDENTIFICADORES[p_esp])]
             m_t = [em for em in m_g if em["date"] >= corte]
-            
-            target.append({"Navio": n_limpo_completo, "Manhã": "✅" if m_g else "❌", "Tarde": "✅" if m_t else "❌"})
+            target.append({"Navio": n_exibicao, "Manhã": "✅" if m_g else "❌", "Tarde": "✅" if m_t else "❌"})
 
-    # Layout HTML Lado a Lado
+    # HTML Lado a Lado
     html = f"""
     <html>
     <body style="font-family: Arial, sans-serif;">
@@ -151,42 +156,5 @@ def processar_e_enviar():
         <table border="0" cellpadding="0" cellspacing="0" style="width: 100%; max-width: 900px;">
             <tr>
                 <td style="width: 48%; vertical-align: top; padding-right: 20px;">
-                    <h3 style="background-color: #003366; color: white; padding: 8px;">FILIAL SÃO LUÍS</h3>
-                    <table border="1" style="border-collapse: collapse; width: 100%; font-size: 12px;">
-                        <tr style="background-color: #f2f2f2;"><th>Navio</th><th>Manhã</th><th>Tarde</th></tr>
-    """
-    for n in res_slz: html += f"<tr><td>{n['Navio']}</td><td align='center'>{n['Manhã']}</td><td align='center'>{n['Tarde']}</td></tr>"
-    html += """</table></td><td style="width: 48%; vertical-align: top; padding-left: 20px;">
-                    <h3 style="background-color: #003366; color: white; padding: 8px;">FILIAL BELÉM / VDC</h3>
-                    <table border="1" style="border-collapse: collapse; width: 100%; font-size: 12px;">
-                        <tr style="background-color: #f2f2f2;"><th>Navio</th><th>Manhã</th><th>Tarde</th></tr>"""
-    for n in res_bel: html += f"<tr><td>{n['Navio']}</td><td align='center'>{n['Manhã']}</td><td align='center'>{n['Tarde']}</td></tr>"
-    html += "</table></td></tr></table></body></html>"
-    
-    enviar_email_html(html, hora_ref)
-    return res_slz, res_bel
-
-# --- INTERFACE ---
-st.set_page_config(page_title="WS Monitor", layout="wide")
-st.title("🚢 Monitor Wilson Sons")
-
-agora_br = datetime.now() - timedelta(hours=3)
-hora_minuto = agora_br.strftime("%H:%M")
-st.metric("Horário Brasília (UTC-3)", hora_minuto)
-
-if hora_minuto in HORARIOS_DISPARO:
-    if "ultimo_envio" not in st.session_state or st.session_state.ultimo_envio != hora_minuto:
-        processar_e_enviar()
-        st.session_state.ultimo_envio = hora_minuto
-
-if st.button("🔄 Executar Agora e Enviar E-mail"):
-    with st.status("Processando dados corporativos..."):
-        r_slz, r_bel = processar_e_enviar()
-        if r_slz or r_bel:
-            st.session_state['res_slz_v'], st.session_state['res_bel_v'] = r_slz, r_bel
-            st.session_state['lista_para_robo'] = [d['Navio'] for d in (r_slz + r_bel)]
-
-if 'res_slz_v' in st.session_state:
-    c1, c2 = st.columns(2)
-    with c1: st.subheader("SÃO LUÍS"); st.table(st.session_state.res_slz_v)
-    with c2: st.subheader("BELÉM / VDC"); st.table(st.session_state.res_bel_v)
+                    <h3 style="background-color: #003366; color: white; padding: 10px; font-size: 14px;">SÃO LUÍS</h3>
+                    <table border="1" style="border-collapse: collapse
