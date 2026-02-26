@@ -12,7 +12,9 @@ EMAIL_PASS = "ighf pteu xtfx fkom"
 DESTINO = "leonardo.alves@wilsonsons.com.br"
 LABEL_PROSPECT = "PROSPECT"
 
-st_autorefresh(interval=60000, key="monitor_fast")
+HORARIOS = ["09:30", "10:00", "11:00", "11:30", "16:00", "17:00", "17:30", "23:28"]
+
+st_autorefresh(interval=60000, key="monitor_auto")  # roda a cada 60s
 
 # --- CONEXÃO IMAP ---
 def conectar_gmail():
@@ -24,7 +26,7 @@ def conectar_gmail():
         st.error(f"Erro Gmail: {e}")
         return None
 
-# --- LIMPAR NOME NAVIO ---
+# --- LIMPAR NOME ---
 def limpar_nome(txt):
     n = re.sub(r'^(MV|M/V|MT|M/T)\s+', '', txt.strip(), flags=re.IGNORECASE)
     n = re.split(r'\s-\s', n)[0]
@@ -65,7 +67,7 @@ def obter_lista_navios(mail):
 
     return slz, bel
 
-# --- BUSCAR EMAILS PROSPECT ---
+# --- BUSCAR EMAILS ---
 def buscar_emails(mail):
     mail.select(f'"{LABEL_PROSPECT}"', readonly=True)
     hoje = (datetime.now() - timedelta(hours=3)).strftime("%d-%b-%Y")
@@ -73,7 +75,7 @@ def buscar_emails(mail):
 
     lista = []
     if data[0]:
-        for eid in data[0].split()[-300:]:
+        for eid in data[0].split()[-200:]:
             try:
                 _, d = mail.fetch(eid, '(BODY.PEEK[HEADER.FIELDS (SUBJECT DATE)])')
                 msg = email.message_from_bytes(d[0][1])
@@ -89,7 +91,7 @@ def buscar_emails(mail):
                 continue
     return lista
 
-# --- EMAIL BONITO ---
+# --- EMAIL ---
 def enviar_email(res_slz, res_bel):
     try:
         msg = MIMEMultipart()
@@ -102,12 +104,11 @@ def enviar_email(res_slz, res_bel):
             for r in lista:
                 cor_m = "#28a745" if r["Manhã"] == "✅" else "#dc3545"
                 cor_t = "#28a745" if r["Tarde"] == "✅" else "#dc3545"
-
                 html += f"""
                 <tr>
                     <td style="padding:6px;border-bottom:1px solid #ddd">{r['Navio']}</td>
-                    <td style="text-align:center;background:{cor_m};color:white;padding:6px">{r['Manhã']}</td>
-                    <td style="text-align:center;background:{cor_t};color:white;padding:6px">{r['Tarde']}</td>
+                    <td style="text-align:center;background:{cor_m};color:white">{r['Manhã']}</td>
+                    <td style="text-align:center;background:{cor_t};color:white">{r['Tarde']}</td>
                 </tr>
                 """
             return html
@@ -115,49 +116,24 @@ def enviar_email(res_slz, res_bel):
         html = f"""
         <html>
         <body style="font-family:Arial;background:#eaf3ff;padding:20px">
-
-            <div style="background:#2b6cb0;color:white;padding:12px;border-radius:6px">
-                <h2 style="margin:0">🚢 Monitor Prospects</h2>
-            </div>
-
-            <br>
-
-            <table width="100%" cellspacing="10">
-                <tr>
-
-                    <td width="50%" valign="top">
-                        <div style="background:white;padding:10px;border-radius:6px">
-                            <h3 style="color:#2b6cb0">Filial São Luís</h3>
-                            <table width="100%" style="border-collapse:collapse">
-                                <tr style="background:#f0f4f8">
-                                    <th align="left">Navio</th>
-                                    <th>Manhã</th>
-                                    <th>Tarde</th>
-                                </tr>
-                                {linhas(res_slz)}
-                            </table>
-                        </div>
-                    </td>
-
-                    <td width="50%" valign="top">
-                        <div style="background:white;padding:10px;border-radius:6px">
-                            <h3 style="color:#2b6cb0">Filial Belém</h3>
-                            <table width="100%" style="border-collapse:collapse">
-                                <tr style="background:#f0f4f8">
-                                    <th align="left">Navio</th>
-                                    <th>Manhã</th>
-                                    <th>Tarde</th>
-                                </tr>
-                                {linhas(res_bel)}
-                            </table>
-                        </div>
-                    </td>
-
-                </tr>
-            </table>
-
-        </body>
-        </html>
+        <h2 style="background:#2b6cb0;color:white;padding:10px;border-radius:6px">🚢 Monitor Prospects</h2>
+        <table width="100%"><tr>
+        <td width="50%">
+        <h3>Filial São Luís</h3>
+        <table border="1" width="100%" style="border-collapse:collapse">
+        <tr><th>Navio</th><th>Manhã</th><th>Tarde</th></tr>
+        {linhas(res_slz)}
+        </table>
+        </td>
+        <td width="50%">
+        <h3>Filial Belém</h3>
+        <table border="1" width="100%" style="border-collapse:collapse">
+        <tr><th>Navio</th><th>Manhã</th><th>Tarde</th></tr>
+        {linhas(res_bel)}
+        </table>
+        </td>
+        </tr></table>
+        </body></html>
         """
 
         msg.attach(MIMEText(html, "html"))
@@ -168,10 +144,10 @@ def enviar_email(res_slz, res_bel):
         server.send_message(msg)
         server.quit()
 
-        st.success("📧 Email enviado com sucesso!")
+        st.success("📧 Email enviado automaticamente!")
 
     except Exception as e:
-        st.error(f"Erro envio email: {e}")
+        st.error(f"Erro email: {e}")
 
 # --- EXECUTAR ---
 def executar():
@@ -186,7 +162,7 @@ def executar():
     nomes_base_bel = [limpar_nome(n) for n in bel]
 
     def analisar(lista, is_belem=False):
-        resultado = []
+        res = []
         for item in lista:
             nome = limpar_nome(item)
             porto = extrair_porto(item)
@@ -199,12 +175,10 @@ def executar():
             manha = any(e["date"].hour < 12 for e in emails_navio)
             tarde = any(e["date"].hour >= 14 for e in emails_navio)
 
-            resultado.append({
-                "Navio": f"{nome} ({porto})" if porto else nome,
-                "Manhã": "✅" if manha else "❌",
-                "Tarde": "✅" if tarde else "❌"
-            })
-        return resultado
+            res.append({"Navio": f"{nome} ({porto})" if porto else nome,
+                        "Manhã": "✅" if manha else "❌",
+                        "Tarde": "✅" if tarde else "❌"})
+        return res
 
     res_slz = analisar(slz)
     res_bel = analisar(bel, True)
@@ -214,18 +188,24 @@ def executar():
 
     enviar_email(res_slz, res_bel)
 
-# --- STREAMLIT ---
-st.set_page_config(page_title="Monitor WS", layout="wide")
-st.title("🚢 Monitor Wilson Sons")
+# --- AUTO DISPARO ---
+agora = (datetime.now() - timedelta(hours=3)).strftime("%H:%M")
 
-if st.button("🔄 Atualizar e Enviar Email"):
+if "ultimo_envio" not in st.session_state:
+    st.session_state["ultimo_envio"] = ""
+
+if agora in HORARIOS and st.session_state["ultimo_envio"] != agora:
     executar()
+    st.session_state["ultimo_envio"] = agora
+
+# --- INTERFACE ---
+st.title("🚢 Monitor Wilson Sons - Auto")
 
 if 'slz' in st.session_state:
     c1, c2 = st.columns(2)
     with c1:
-        st.subheader("Filial São Luís")
+        st.subheader("São Luís")
         st.table(st.session_state['slz'])
     with c2:
-        st.subheader("Filial Belém")
+        st.subheader("Belém")
         st.table(st.session_state['bel'])
