@@ -2,3 +2,4 @@ streamlit==1.54.0
 pandas
 selenium
 webdriver-manager
+streamlit-autorefresh
