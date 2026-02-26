@@ -8,31 +8,28 @@ from streamlit_autorefresh import st_autorefresh
 EMAIL_USER = "leonardo.alves@wilsonsons.com.br"
 EMAIL_PASS = "ighf pteu xtfx fkom"
 
-REMS = {
-    "SLZ": ["operation.sluis@wilsonsons.com.br", "agencybrazil@cargill.com"],
-    "BEL": ["operation.belem@wilsonsons.com.br"]
-}
+LABEL_NAME = "PROSPECT"
 
 st_autorefresh(interval=60000, key="monitor_fast")
 
-# --- CONEXÃO GMAIL ---
+# --- CONEXÃO ---
 def conectar_gmail():
     try:
         mail = imaplib.IMAP4_SSL("imap.gmail.com")
         mail.login(EMAIL_USER, EMAIL_PASS)
 
-        status, _ = mail.select('"[Gmail]/All Mail"', readonly=True)
+        status, _ = mail.select(f'"{LABEL_NAME}"', readonly=True)
         if status != "OK":
-            status, _ = mail.select("INBOX", readonly=True)
-            if status != "OK":
-                return None
+            st.error(f"Não foi possível acessar a label {LABEL_NAME}")
+            return None
+
         return mail
     except Exception as e:
         st.error(f"Erro conexão Gmail: {e}")
         return None
 
 # --- LIMPAR NOME NAVIO ---
-def limpar_nome_simples(txt):
+def limpar_nome(txt):
     n = re.sub(r'^(MV|M/V|MT|M/T)\s+', '', txt.strip(), flags=re.IGNORECASE)
     n = re.sub(r'\(.*?\)', '', n)
     n = re.sub(r'\s+', ' ', n)
@@ -69,20 +66,11 @@ def obter_lista_navios(mail):
 
     return slz, bel
 
-# --- BUSCAR EMAILS HOJE (FIX FETCH) ---
+# --- BUSCAR EMAILS DO DIA NA LABEL PROSPECT ---
 def buscar_emails_hoje(mail):
     hoje = (datetime.now() - timedelta(hours=3)).strftime("%d-%b-%Y")
 
-    remetentes = [r for grupo in REMS.values() for r in grupo]
-    if not remetentes:
-        return []
-
-    criterio_from = f'(FROM "{remetentes[0]}")'
-    for r in remetentes[1:]:
-        criterio_from = f'(OR {criterio_from} (FROM "{r}"))'
-
-    criterio = f'(SINCE "{hoje}" {criterio_from})'
-    _, data = mail.search(None, criterio)
+    _, data = mail.search(None, f'(SINCE "{hoje}")')
 
     lista = []
     if data[0]:
@@ -90,7 +78,7 @@ def buscar_emails_hoje(mail):
 
         for eid in ids:
             try:
-                _, d = mail.fetch(eid, '(BODY.PEEK[HEADER.FIELDS (SUBJECT DATE FROM)])')
+                _, d = mail.fetch(eid, '(BODY.PEEK[HEADER.FIELDS (SUBJECT DATE)])')
                 msg = email.message_from_bytes(d[0][1])
 
                 subj = "".join(
@@ -104,7 +92,6 @@ def buscar_emails_hoje(mail):
 
                 lista.append({
                     "subj": subj,
-                    "from": msg.get("From", "").lower(),
                     "date": envio
                 })
             except:
@@ -112,7 +99,7 @@ def buscar_emails_hoje(mail):
 
     return lista
 
-# --- EXECUTAR ---
+# --- EXECUÇÃO ---
 def executar():
     mail = conectar_gmail()
     if not mail:
@@ -127,24 +114,24 @@ def executar():
 
     res_slz = []
     for n in slz_bruto:
-        nome_core = limpar_nome_simples(n)
-        m_g = [e for e in db_emails if nome_core in e["subj"] and any(r in e["from"] for r in REMS["SLZ"])]
+        nome = limpar_nome(n)
+        m_g = [e for e in db_emails if nome in e["subj"]]
         m_t = [e for e in m_g if e["date"] >= corte]
 
         res_slz.append({
-            "Navio": nome_core,
+            "Navio": nome,
             "Manhã": "✅" if m_g else "❌",
             "Tarde": "✅" if m_t else "❌"
         })
 
     res_bel = []
     for n in bel_bruto:
-        nome_core = limpar_nome_simples(n)
-        m_g = [e for e in db_emails if nome_core in e["subj"] and any(r in e["from"] for r in REMS["BEL"])]
+        nome = limpar_nome(n)
+        m_g = [e for e in db_emails if nome in e["subj"]]
         m_t = [e for e in m_g if e["date"] >= corte]
 
         res_bel.append({
-            "Navio": nome_core,
+            "Navio": nome,
             "Manhã": "✅" if m_g else "❌",
             "Tarde": "✅" if m_t else "❌"
         })
@@ -153,8 +140,8 @@ def executar():
     st.session_state['res_bel'] = res_bel
 
 # --- STREAMLIT ---
-st.set_page_config(page_title="Monitor WS", layout="wide")
-st.title("🚢 Monitor Wilson Sons")
+st.set_page_config(page_title="Monitor WS Ultra Fast", layout="wide")
+st.title("🚢 Monitor Wilson Sons – PROSPECT MODE")
 
 agora_br = datetime.now() - timedelta(hours=3)
 st.metric("Horário Brasília", agora_br.strftime("%H:%M"))
