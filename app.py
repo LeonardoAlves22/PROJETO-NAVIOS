@@ -15,7 +15,7 @@ REMS = {
 
 st_autorefresh(interval=60000, key="monitor_fast")
 
-# --- CONEXÃO GMAIL ---
+# --- CONEXÃO ---
 def conectar_gmail():
     try:
         mail = imaplib.IMAP4_SSL("imap.gmail.com")
@@ -26,13 +26,12 @@ def conectar_gmail():
             status, _ = mail.select("INBOX", readonly=True)
             if status != "OK":
                 return None
-
         return mail
     except Exception as e:
-        st.error(f"Erro ao conectar Gmail: {e}")
+        st.error(f"Erro conexão Gmail: {e}")
         return None
 
-# --- LIMPEZA NOME NAVIO (CORRIGIDA) ---
+# --- LIMPAR NOME NAVIO ---
 def limpar_nome_simples(txt):
     n = re.sub(r'^(MV|M/V|MT|M/T)\s+', '', txt.strip(), flags=re.IGNORECASE)
     n = re.sub(r'\(.*?\)', '', n)
@@ -70,21 +69,25 @@ def obter_lista_navios(mail):
 
     return slz, bel
 
-# --- BUSCAR EMAILS ---
+# --- BUSCAR EMAILS HOJE (CORRIGIDO) ---
 def buscar_emails_hoje(mail):
     hoje = (datetime.now() - timedelta(hours=3)).strftime("%d-%b-%Y")
 
-    filtros = []
-    for grupo in REMS.values():
-        for remetente in grupo:
-            filtros.append(f'(FROM "{remetente}")')
+    remetentes = [r for grupo in REMS.values() for r in grupo]
 
-    criterio = f'(SINCE "{hoje}" {" ".join(filtros)})'
+    if not remetentes:
+        return []
+
+    criterio_from = f'(FROM "{remetentes[0]}")'
+    for r in remetentes[1:]:
+        criterio_from = f'(OR {criterio_from} (FROM "{r}"))'
+
+    criterio = f'(SINCE "{hoje}" {criterio_from})'
     _, data = mail.search(None, criterio)
 
     lista = []
     if data[0]:
-        ids = data[0].split()[-200:]
+        ids = data[0].split()[-300:]
         if ids:
             _, dados = mail.fetch(",".join(ids),
                                   '(BODY.PEEK[HEADER.FIELDS (SUBJECT DATE FROM)])')
@@ -113,7 +116,7 @@ def buscar_emails_hoje(mail):
 
     return lista
 
-# --- EXECUÇÃO PRINCIPAL ---
+# --- EXECUTAR ---
 def executar():
     mail = conectar_gmail()
     if not mail:
@@ -162,8 +165,8 @@ def executar():
     st.session_state['res_bel'] = res_bel
 
 # --- STREAMLIT UI ---
-st.set_page_config(page_title="Monitor WS FAST", layout="wide")
-st.title("🚢 Monitor Wilson Sons 3.1")
+st.set_page_config(page_title="Monitor WS", layout="wide")
+st.title("🚢 Monitor Wilson Sons")
 
 agora_br = datetime.now() - timedelta(hours=3)
 st.metric("Horário Brasília", agora_br.strftime("%H:%M"))
@@ -171,7 +174,7 @@ st.metric("Horário Brasília", agora_br.strftime("%H:%M"))
 if st.button("🔄 ATUALIZAR AGORA"):
     with st.status("Sincronizando..."):
         executar()
-        st.success("Dados atualizados!")
+        st.success("Atualizado!")
 
 if 'res_slz' in st.session_state:
     c1, c2 = st.columns(2)
