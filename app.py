@@ -24,8 +24,8 @@ PORTOS_IDENTIFICADORES = {
     "VDC": ["VILA DO CONDE", "VDC", "BARCARENA"]
 }
 
-# Auto-refresh para manter o app ativo na nuvem
-st_autorefresh(interval=60000, key="auto_disparo_v8")
+# Auto-refresh a cada 60 segundos para manter o app ativo para os disparos
+st_autorefresh(interval=60000, key="auto_disparo_vFinal_OK")
 
 # --- FUNÇÕES DE APOIO ---
 def enviar_email_html(html_conteudo, hora_ref):
@@ -65,6 +65,7 @@ def identificar_porto_na_lista(nome_bruto):
     return None
 
 def selecionar_pasta_todos(mail):
+    # Tenta as pastas comuns do Gmail Corporativo para "Todos os e-mails"
     pastas = ['"[Gmail]/All Mail"', '"[Gmail]/Todos os e-mails"', 'INBOX']
     for p in pastas:
         status, _ = mail.select(p, readonly=True)
@@ -75,12 +76,14 @@ def buscar_dados_email():
     try:
         mail = imaplib.IMAP4_SSL("imap.gmail.com")
         mail.login(EMAIL_USER, EMAIL_PASS)
+        
         if not selecionar_pasta_todos(mail):
             mail.logout()
             return [], [], [], (datetime.now() - timedelta(hours=3))
 
+        # 1. Busca e-mail da LISTA NAVIOS
         _, messages = mail.search(None, '(SUBJECT "LISTA NAVIOS")')
-        if not messages[0]: 
+        if not messages[0]:
             mail.logout()
             return [], [], [], (datetime.now() - timedelta(hours=3))
         
@@ -89,27 +92,4 @@ def buscar_dados_email():
         msg_raw = email.message_from_bytes(data[0][1])
         
         corpo = ""
-        if msg_raw.is_multipart():
-            for part in msg_raw.walk():
-                if part.get_content_type() == "text/plain":
-                    corpo = part.get_payload(decode=True).decode(errors='ignore')
-                    break
-        else:
-            corpo = msg_raw.get_payload(decode=True).decode(errors='ignore')
-        
-        corpo_limpo = re.split(r'Best regards|Regards', corpo, flags=re.IGNORECASE)[0]
-        partes = re.split(r'BELEM:', corpo_limpo, flags=re.IGNORECASE)
-        
-        slz_lista = [n.strip() for n in partes[0].replace('SLZ:', '').split('\n') if n.strip() and "SLZ:" not in n.upper()]
-        bel_lista = [n.strip() for n in partes[1].split('\n') if n.strip()] if len(partes) > 1 else []
-        
-        agora_brasil = datetime.now() - timedelta(hours=3)
-        hoje_str = agora_brasil.strftime("%d-%b-%Y")
-        
-        _, ids = mail.search(None, f'(SINCE "{hoje_str}")')
-        emails_encontrados = []
-        if ids[0]:
-            for e_id in ids[0].split():
-                _, data = mail.fetch(e_id, '(BODY[HEADER.FIELDS (SUBJECT DATE FROM)])')
-                msg = email.message_from_bytes(data[0][1])
-                data_envio = email.utils.parsed
+        if msg_
