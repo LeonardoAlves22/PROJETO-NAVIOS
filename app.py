@@ -4,10 +4,9 @@ from email.header import decode_header
 from datetime import datetime, timedelta
 from streamlit_autorefresh import st_autorefresh
 
-# --- CONFIGURAÇÕES ---
+# --- CONFIG ---
 EMAIL_USER = "leonardo.alves@wilsonsons.com.br"
 EMAIL_PASS = "ighf pteu xtfx fkom"
-
 LABEL_PROSPECT = "PROSPECT"
 
 st_autorefresh(interval=60000, key="monitor_fast")
@@ -19,12 +18,13 @@ def conectar_gmail():
         mail.login(EMAIL_USER, EMAIL_PASS)
         return mail
     except Exception as e:
-        st.error(f"Erro conexão Gmail: {e}")
+        st.error(f"Erro Gmail: {e}")
         return None
 
 # --- LIMPAR NOME NAVIO ---
 def limpar_nome(txt):
     n = re.sub(r'^(MV|M/V|MT|M/T)\s+', '', txt.strip(), flags=re.IGNORECASE)
+    n = re.split(r'\s-\s', n)[0]  # corta após hífen
     n = re.sub(r'\(.*?\)', '', n)
     n = re.sub(r'\s+', ' ', n)
     return n.strip().upper()
@@ -32,14 +32,14 @@ def limpar_nome(txt):
 # --- LISTA NAVIOS (INBOX) ---
 def obter_lista_navios(mail):
     mail.select("INBOX", readonly=True)
-
     _, data = mail.search(None, '(SUBJECT "LISTA NAVIOS")')
+
     if not data[0]:
         return [], []
 
-    id_recente = data[0].split()[-1]
-    _, bytes_data = mail.fetch(id_recente, '(RFC822)')
-    msg = email.message_from_bytes(bytes_data[0][1])
+    eid = data[0].split()[-1]
+    _, d = mail.fetch(eid, '(RFC822)')
+    msg = email.message_from_bytes(d[0][1])
 
     corpo = ""
     if msg.is_multipart():
@@ -53,16 +53,12 @@ def obter_lista_navios(mail):
     corpo = re.split(r'Regards|Best regards', corpo, flags=re.IGNORECASE)[0]
     partes = re.split(r'BELEM:', corpo, flags=re.IGNORECASE)
 
-    slz = [n.strip() for n in partes[0].replace('SLZ:', '').split('\n')
-           if n.strip() and "SLZ:" not in n.upper()]
-
-    bel = []
-    if len(partes) > 1:
-        bel = [n.strip() for n in partes[1].split('\n') if n.strip()]
+    slz = [n.strip() for n in partes[0].replace('SLZ:', '').split('\n') if n.strip()]
+    bel = [n.strip() for n in partes[1].split('\n') if n.strip()] if len(partes) > 1 else []
 
     return slz, bel
 
-# --- PROSPECT EMAILS (LABEL PROSPECT) ---
+# --- EMAILS PROSPECT (LABEL) ---
 def buscar_emails_prospect(mail):
     mail.select(f'"{LABEL_PROSPECT}"', readonly=True)
 
@@ -71,9 +67,7 @@ def buscar_emails_prospect(mail):
 
     lista = []
     if data[0]:
-        ids = data[0].split()[-200:]
-
-        for eid in ids:
+        for eid in data[0].split()[-200:]:
             try:
                 _, d = mail.fetch(eid, '(BODY.PEEK[HEADER.FIELDS (SUBJECT DATE)])')
                 msg = email.message_from_bytes(d[0][1])
@@ -83,17 +77,14 @@ def buscar_emails_prospect(mail):
                     for c, ch in decode_header(msg.get("Subject", ""))
                 ).upper()
 
-                envio = email.utils.parsedate_to_datetime(
-                    msg.get("Date")
-                ).replace(tzinfo=None)
-
+                envio = email.utils.parsedate_to_datetime(msg.get("Date")).replace(tzinfo=None)
                 lista.append({"subj": subj, "date": envio})
             except:
                 continue
 
     return lista
 
-# --- EXECUÇÃO ---
+# --- EXECUTAR ---
 def executar():
     mail = conectar_gmail()
     if not mail:
@@ -103,29 +94,36 @@ def executar():
     emails = buscar_emails_prospect(mail)
     mail.logout()
 
-    agora_br = datetime.now() - timedelta(hours=3)
-    corte = agora_br.replace(hour=14, minute=0, second=0)
+    agora = datetime.now() - timedelta(hours=3)
 
-    res_slz = []
-    for n in slz:
-        nome = limpar_nome(n)
-        m_g = [e for e in emails if nome in e["subj"]]
-        m_t = [e for e in m_g if e["date"] >= corte]
-        res_slz.append({"Navio": nome, "Manhã": "✅" if m_g else "❌", "Tarde": "✅" if m_t else "❌"})
+    res_slz, res_bel = [], []
 
-    res_bel = []
-    for n in bel:
-        nome = limpar_nome(n)
-        m_g = [e for e in emails if nome in e["subj"]]
-        m_t = [e for e in m_g if e["date"] >= corte]
-        res_bel.append({"Navio": nome, "Manhã": "✅" if m_g else "❌", "Tarde": "✅" if m_t else "❌"})
+    def analisar(lista_navios):
+        resultado = []
+        for n in lista_navios:
+            nome = limpar_nome(n)
+
+            emails_navio = [e for e in emails if nome in e["subj"]]
+
+            manha = any(e["date"].hour < 12 for e in emails_navio)
+            tarde = any(e["date"].hour >= 14 for e in emails_navio)
+
+            resultado.append({
+                "Navio": nome,
+                "Manhã": "✅" if manha else "❌",
+                "Tarde": "✅" if tarde else "❌"
+            })
+        return resultado
+
+    res_slz = analisar(slz)
+    res_bel = analisar(bel)
 
     st.session_state['res_slz'] = res_slz
     st.session_state['res_bel'] = res_bel
 
 # --- STREAMLIT ---
 st.set_page_config(page_title="Monitor WS", layout="wide")
-st.title("🚢 Monitor Wilson Sons – Prospect Mode")
+st.title("🚢 Monitor Wilson Sons")
 
 if st.button("🔄 Atualizar"):
     executar()
@@ -136,5 +134,5 @@ if 'res_slz' in st.session_state:
         st.subheader("São Luís")
         st.table(st.session_state['res_slz'])
     with c2:
-        st.subheader("Belém / VDC")
+        st.subheader("Belém")
         st.table(st.session_state['res_bel'])
