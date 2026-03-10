@@ -8,7 +8,7 @@ from streamlit_autorefresh import st_autorefresh
 
 # --- CONFIG ---
 EMAIL_USER = "leonardo.alves@wilsonsons.com.br"
-EMAIL_PASS = "ighf pteu xtfx fkom"
+EMAIL_PASS = "nlvr vmyv cbcq oexe"
 
 DESTINOS = [
     "leonardo.alves@wilsonsons.com.br",
