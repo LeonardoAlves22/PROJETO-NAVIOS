@@ -67,17 +67,29 @@ def processar_tudo():
         else:
             corpo_lista = msg_lista.get_payload(decode=True).decode(errors="ignore")
 
-        # Parsing da lista
-        partes = re.split(r'BELEM:', corpo_lista, flags=re.IGNORECASE)
-        slz_bruto = [n.strip() for n in partes[0].replace('SLZ:', '').split('\n') if len(n.strip()) > 3]
-        bel_bruto = [n.strip() for n in partes[1].split('\n') if len(n.strip()) > 3] if len(partes) > 1 else []
+        # --- NOVA LÓGICA DE CORTE (STOP NA ASSINATURA) ---
+        # Remove tudo a partir de termos comuns de assinatura
+        padrao_assinatura = r'(Best regards|Regards|Atenciosamente|Obrigado|Thanks|Cordialmente)'
+        corpo_limpo = re.split(padrao_assinatura, corpo_lista, flags=re.IGNORECASE)[0]
+
+        # Divide entre São Luís e Belém
+        partes = re.split(r'BELEM:', corpo_limpo, flags=re.IGNORECASE)
+        
+        # Lista SLZ (Vem antes de BELEM:)
+        slz_texto = partes[0].replace('SLZ:', '')
+        slz_bruto = [n.strip() for n in slz_texto.split('\n') if len(n.strip()) > 3]
+        
+        # Lista Belém (Vem depois de BELEM:)
+        bel_bruto = []
+        if len(partes) > 1:
+            bel_texto = partes[1]
+            bel_bruto = [n.strip() for n in bel_texto.split('\n') if len(n.strip()) > 3]
         
         log.append(f"🚢 SLZ: {len(slz_bruto)} navios | BEL: {len(bel_bruto)} navios.")
 
         # 2. BUSCAR PROSPECTS
-        # Tenta a label, se não der, vai na inbox
-        st_p, _ = mail.select(f'"{LABEL_PROSPECT}"', readonly=True)
-        if st_p != 'OK': mail.select("INBOX", readonly=True)
+        status_p, _ = mail.select(f'"{LABEL_PROSPECT}"', readonly=True)
+        if status_p != 'OK': mail.select("INBOX", readonly=True)
 
         data_busca = (datetime.now(BR_TZ) - timedelta(days=1)).strftime("%d-%b-%Y")
         _, data_prospects = mail.search(None, f'(SINCE "{data_busca}")')
@@ -86,7 +98,7 @@ def processar_tudo():
         hoje_br = datetime.now(BR_TZ).date()
 
         if data_prospects[0]:
-            ids = data_prospects[0].split()[-100:] # últimos 100
+            ids = data_prospects[0].split()[-100:]
             for eid in ids:
                 try:
                     _, d = mail.fetch(eid, '(RFC822)')
@@ -97,7 +109,6 @@ def processar_tudo():
                         s = "".join(str(c.decode(ch or 'utf-8') if isinstance(c, bytes) else c) 
                                    for c, ch in decode_header(m.get("Subject", ""))).upper()
                         
-                        # Pegar corpo para ETA/ETB/ETD
                         c_p = ""
                         if m.is_multipart():
                             for p in m.walk():
@@ -115,12 +126,12 @@ def processar_tudo():
         # 3. CRUZAR DADOS
         def montar(lista_base, is_bel=False):
             out = []
-            nomes_bel = [limpar_nome(n) for n in bel_bruto]
+            nomes_bel_limpos = [limpar_nome(n) for n in bel_bruto]
             for item in lista_base:
                 n_limpo = limpar_nome(item)
                 p_limpo = extrair_porto(item)
                 
-                if is_bel and nomes_bel.count(n_limpo) > 1 and p_limpo:
+                if is_bel and nomes_bel_limpos.count(n_limpo) > 1 and p_limpo:
                     evs = [e for e in emails_hj if n_limpo in e["subj"] and p_limpo in e["subj"]]
                 else:
                     evs = [e for e in emails_hj if n_limpo in e["subj"]]
@@ -155,9 +166,9 @@ st.title("🚢 Monitor Operacional Wilson Sons")
 if st.button("🔄 ATUALIZAR AGORA", use_container_width=True):
     processar_tudo()
 
-# Exibir Logs de Debug (Importante para saber por que está em branco)
+# Exibir Logs de Debug (Importante)
 if 'logs' in st.session_state:
-    with st.expander("🔍 Detalhes do Processamento (Debug)"):
+    with st.expander("🔍 Detalhes do Processamento"):
         for l in st.session_state['logs']:
             st.write(l)
 
