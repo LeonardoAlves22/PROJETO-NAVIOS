@@ -10,7 +10,7 @@ import pytz
 # --- CONFIGURAÇÕES ---
 EMAIL_USER = "leonardo.alves@wilsonsons.com.br"
 EMAIL_PASS = "nlvr vmyv cbcq oexe"
-DESTINOS = ["leonardo.alves@wilsonsons.com.br"]
+DESTINOS = ["leonardo.alves@wilsonsons.com.br", "operation.belem@wilsonsons.com.br", "operation.sluis@wilsonsons.com.br"]
 LABEL_PROSPECT = "PROSPECT"
 HORARIOS = ["09:30","10:00","11:00","11:30","16:00","17:00","17:30"]
 
