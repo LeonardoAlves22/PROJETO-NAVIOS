@@ -14,15 +14,15 @@ DESTINOS = ["leonardo.alves@wilsonsons.com.br", "operation.belem@wilsonsons.com.
 LABEL_PROSPECT = "PROSPECT"
 HORARIOS_ENVIO_EMAIL = ["09:30","10:00","11:00","11:30","16:00","17:00","17:30"]
 
-# Timezone de Brasília para garantir precisão no GMT-3
-BR_TIMEZONE = pytz.timezone('America/Sao_Paulo')
+# Timezone de Brasília
+BR_TZ = pytz.timezone('America/Sao_Paulo')
 
 st_autorefresh(interval=60000, key="auto_refresh")
 
-# --- FUNÇÕES AUXILIARES ---
+# --- FUNÇÕES DE APOIO ---
 
 def obter_agora_br():
-    return datetime.now(BR_TIMEZONE)
+    return datetime.now(BR_TZ)
 
 def limpar_nome(txt):
     n = re.sub(r'^(MV|M/V|MT|M/T)\s+', '', txt.strip(), flags=re.IGNORECASE)
@@ -46,7 +46,7 @@ def extrair_datas_corpo(corpo):
             info[chave] = match.group(1).strip().upper()
     return info
 
-# --- CONEXÃO E BUSCA ---
+# --- CONEXÃO GMAIL ---
 
 def conectar_gmail():
     try:
@@ -54,18 +54,18 @@ def conectar_gmail():
         mail.login(EMAIL_USER, EMAIL_PASS)
         return mail
     except Exception as e:
-        st.error(f"Erro Gmail: {e}")
+        st.error(f"Falha na autenticação: {e}")
         return None
 
 def obter_lista_navios(mail):
     mail.select("INBOX", readonly=True)
     _, data = mail.search(None, '(SUBJECT "LISTA NAVIOS")')
     if not data[0]: return [], []
-
+    
     eid = data[0].split()[-1]
     _, d = mail.fetch(eid, '(RFC822)')
     msg = email.message_from_bytes(d[0][1])
-
+    
     corpo = ""
     if msg.is_multipart():
         for part in msg.walk():
@@ -82,23 +82,29 @@ def obter_lista_navios(mail):
     return slz, bel
 
 def buscar_emails(mail):
-    mail.select(f'"{LABEL_PROSPECT}"', readonly=True)
-    # Busca desde ontem para não perder e-mails da virada da meia-noite
-    ontem = (obter_agora_br() - timedelta(days=1)).strftime("%d-%b-%Y")
-    _, data = mail.search(None, f'(SINCE "{ontem}")')
+    # Tenta selecionar a pasta PROSPECT, se falhar tenta INBOX
+    try:
+        status, _ = mail.select(f'"{LABEL_PROSPECT}"', readonly=True)
+        if status != 'OK': mail.select("INBOX", readonly=True)
+    except:
+        mail.select("INBOX", readonly=True)
+
+    # Busca desde 2 dias atrás para garantir que nada escape do fuso
+    data_busca = (obter_agora_br() - timedelta(days=2)).strftime("%d-%b-%Y")
+    _, data = mail.search(None, f'(SINCE "{data_busca}")')
 
     lista = []
     hoje_br = obter_agora_br().date()
 
     if data[0]:
-        for eid in data[0].split()[-150:]:
+        for eid in data[0].split()[-150:]: # Processa os últimos 150 e-mails
             try:
                 _, d = mail.fetch(eid, '(RFC822)')
                 msg = email.message_from_bytes(d[0][1])
-                
                 envio_utc = email.utils.parsedate_to_datetime(msg.get("Date"))
-                envio_br = envio_utc.astimezone(BR_TIMEZONE)
+                envio_br = envio_utc.astimezone(BR_TZ)
 
+                # FILTRO RÍGIDO: Somente e-mails de HOJE no horário de Brasília
                 if envio_br.date() != hoje_br:
                     continue
 
@@ -123,9 +129,12 @@ def buscar_emails(mail):
                 continue
     return lista
 
-# --- PROCESSAMENTO ---
+# --- CORE ---
 
 def gerar_relatorio():
+    status_placeholder = st.empty()
+    status_placeholder.info("⏳ Acessando e-mails...")
+    
     mail = conectar_gmail()
     if not mail: return
 
@@ -141,35 +150,31 @@ def gerar_relatorio():
         for item in lista_origem:
             nome = limpar_nome(item)
             porto = extrair_porto(item)
-
             if is_belem and nomes_base_bel.count(nome) > 1 and porto:
-                emails_vessel = [e for e in emails_prospect if nome in e["subj"] and porto in e["subj"]]
+                evs = [e for e in emails_prospect if nome in e["subj"] and porto in e["subj"]]
             else:
-                emails_vessel = [e for e in emails_prospect if nome in e["subj"]]
+                evs = [e for e in emails_prospect if nome in e["subj"]]
 
-            # Identifica se houve envio AM (00:00-11:59) e PM (14:00+)
-            manha = any(e["date"].hour < 12 for e in emails_vessel)
-            tarde = any(e["date"].hour >= 14 for e in emails_vessel) if agora_br.hour >= 14 else False
+            # Se o e-mail foi 00:10, ele entra em Manhã (hour < 12)
+            manha = any(e["date"].hour < 12 for e in evs)
+            tarde = any(e["date"].hour >= 14 for e in evs) if agora_br.hour >= 14 else False
 
-            datas_info = {"ETA": "-", "ETB": "-", "ETD": "-"}
-            if emails_vessel:
-                emails_vessel.sort(key=lambda x: x["date"], reverse=True)
-                datas_info = emails_vessel[0]["datas_op"]
+            dt = {"ETA": "-", "ETB": "-", "ETD": "-"}
+            if evs:
+                evs.sort(key=lambda x: x["date"], reverse=True)
+                dt = evs[0]["datas_op"]
 
             res.append({
                 "Navio": f"{nome} ({porto})" if porto else nome,
                 "Manhã": "✅" if manha else "❌",
                 "Tarde": "✅" if tarde else "❌",
-                "ETA": datas_info["ETA"],
-                "ETB": datas_info["ETB"],
-                "ETD": datas_info["ETD"]
+                "ETA": dt["ETA"], "ETB": dt["ETB"], "ETD": dt["ETD"]
             })
         return res
 
     st.session_state['slz'] = analisar(slz_bruto)
     st.session_state['bel'] = analisar(bel_bruto, True)
-
-# --- ENVIO DE E-MAIL (CORRIGIDO SEM ERRO DE SINTAXE) ---
+    status_placeholder.success(f"✅ Atualizado em: {agora_br.strftime('%H:%M:%S')}")
 
 def enviar_email():
     if 'slz' not in st.session_state: return
@@ -185,42 +190,41 @@ def enviar_email():
                 cm = "#28a745" if r["Manhã"] == "✅" else "#dc3545"
                 ct = "#28a745" if r["Tarde"] == "✅" else "#dc3545"
                 rows += "<tr>"
-                rows += "<td style='padding:5px; border:1px solid #ccc'>" + str(r['Navio']) + "</td>"
-                rows += "<td style='background:" + cm + "; color:white; text-align:center'>" + r['Manhã'] + "</td>"
-                rows += "<td style='background:" + ct + "; color:white; text-align:center'>" + r['Tarde'] + "</td>"
-                rows += "<td style='padding:5px; border:1px solid #ccc; text-align:center'>" + r['ETA'] + "</td>"
-                rows += "<td style='padding:5px; border:1px solid #ccc; text-align:center'>" + r['ETB'] + "</td>"
-                rows += "<td style='padding:5px; border:1px solid #ccc; text-align:center'>" + r['ETD'] + "</td>"
+                rows += f"<td style='padding:5px; border:1px solid #ccc'>{r['Navio']}</td>"
+                rows += f"<td style='background:{cm}; color:white; text-align:center'>{r['Manhã']}</td>"
+                rows += f"<td style='background:{ct}; color:white; text-align:center'>{r['Tarde']}</td>"
+                rows += f"<td style='padding:5px; border:1px solid #ccc; text-align:center'>{r['ETA']}</td>"
+                rows += f"<td style='padding:5px; border:1px solid #ccc; text-align:center'>{r['ETB']}</td>"
+                rows += f"<td style='padding:5px; border:1px solid #ccc; text-align:center'>{r['ETD']}</td>"
                 rows += "</tr>"
             return rows
 
-        html = "<html><body>"
-        html += "<h2 style='color:#2b6cb0'>Monitor Wilson Sons</h2>"
-        html += "<h3>São Luís</h3><table border='1' style='border-collapse:collapse; width:100%'>"
-        html += "<tr style='background:#eee'><th>Navio</th><th>AM</th><th>PM</th><th>ETA</th><th>ETB</th><th>ETD</th></tr>"
-        html += build_rows(st.session_state['slz']) + "</table>"
-        html += "<h3>Belém</h3><table border='1' style='border-collapse:collapse; width:100%'>"
-        html += "<tr style='background:#eee'><th>Navio</th><th>AM</th><th>PM</th><th>ETA</th><th>ETB</th><th>ETD</th></tr>"
-        html += build_rows(st.session_state['bel']) + "</table>"
-        html += "</body></html>"
+        html = f"""<html><body>
+            <h2 style='color:#2b6cb0'>Monitor Wilson Sons</h2>
+            <h3>São Luís</h3><table border='1' style='border-collapse:collapse; width:100%'>
+            <tr style='background:#eee'><th>Navio</th><th>AM</th><th>PM</th><th>ETA</th><th>ETB</th><th>ETD</th></tr>
+            {build_rows(st.session_state['slz'])}</table>
+            <h3>Belém</h3><table border='1' style='border-collapse:collapse; width:100%'>
+            <tr style='background:#eee'><th>Navio</th><th>AM</th><th>PM</th><th>ETA</th><th>ETB</th><th>ETD</th></tr>
+            {build_rows(st.session_state['bel'])}</table>
+            </body></html>"""
 
         msg.attach(MIMEText(html, "html"))
         with smtplib.SMTP("smtp.gmail.com", 587) as s:
             s.starttls()
             s.login(EMAIL_USER, EMAIL_PASS)
             s.send_message(msg)
-        st.success("E-mail enviado!")
+        st.success("📧 E-mail enviado!")
     except Exception as e:
         st.error(f"Erro e-mail: {e}")
 
-# --- INTERFACE ---
+# --- UI ---
 st.set_page_config(page_title="Monitor Wilson Sons", layout="wide")
 st.title("🚢 Monitor Operacional Wilson Sons")
 
 agora_str = obter_agora_br().strftime("%H:%M")
 if "ultimo_envio" not in st.session_state: st.session_state["ultimo_envio"] = ""
 
-# Lógica de envio automático baseada nos horários configurados
 if agora_str in HORARIOS_ENVIO_EMAIL and st.session_state["ultimo_envio"] != agora_str:
     gerar_relatorio()
     enviar_email()
@@ -228,13 +232,16 @@ if agora_str in HORARIOS_ENVIO_EMAIL and st.session_state["ultimo_envio"] != ago
 
 c1, c2 = st.columns(2)
 with c1:
-    if st.button("🔄 Atualizar Relatório"): gerar_relatorio()
+    if st.button("🔄 Atualizar Relatório", use_container_width=True):
+        gerar_relatorio()
 with c2:
-    if st.button("📧 Forçar Envio"): 
+    if st.button("📧 Forçar Envio de Email", use_container_width=True):
         gerar_relatorio()
         enviar_email()
 
 if 'slz' in st.session_state:
-    for titulo, chave in [("📍 São Luís", "slz"), ("📍 Belém", "bel")]:
-        st.subheader(titulo)
-        st.dataframe(st.session_state[chave], use_container_width=True, hide_index=True)
+    tab1, tab2 = st.tabs(["📍 São Luís", "📍 Belém"])
+    with tab1:
+        st.dataframe(st.session_state['slz'], use_container_width=True, hide_index=True)
+    with tab2:
+        st.dataframe(st.session_state['bel'], use_container_width=True, hide_index=True)
