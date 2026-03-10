@@ -14,21 +14,10 @@ DESTINOS = ["leonardo.alves@wilsonsons.com.br"]
 LABEL_PROSPECT = "PROSPECT"
 HORARIOS = ["09:30","10:00","11:00","11:30","16:00","17:00","17:30"]
 
-# Timezone Brasil
 BR_TZ = pytz.timezone('America/Sao_Paulo')
-
 st_autorefresh(interval=60000, key="auto_refresh")
 
 # --- AUXILIARES ---
-def conectar_gmail():
-    try:
-        mail = imaplib.IMAP4_SSL("imap.gmail.com")
-        mail.login(EMAIL_USER, EMAIL_PASS)
-        return mail
-    except Exception as e:
-        st.error(f"Erro Gmail: {e}")
-        return None
-
 def limpar_nome(txt):
     n = re.sub(r'^(MV|M/V|MT|M/T)\s+', '', txt.strip(), flags=re.IGNORECASE)
     n = re.split(r'\s-\s', n)[0]
@@ -44,167 +33,169 @@ def extrair_datas(corpo):
     res = {"ETA": "-", "ETB": "-", "ETD": "-"}
     if not corpo: return res
     for k in res.keys():
+        # Busca a sigla e pega a data/hora logo a frente
         m = re.search(rf"{k}\s*[:\-]?\s*(\d{{1,2}}[/|-](?:\d{{1,2}}|[A-Z]{{3}})[^ \n]*)", corpo, re.IGNORECASE)
         if m: res[k] = m.group(1).strip().upper()
     return res
 
-# --- LISTA NAVIOS (INBOX) ---
-def obter_lista_navios(mail):
-    mail.select("INBOX", readonly=True)
-    _, data = mail.search(None, '(SUBJECT "LISTA NAVIOS")')
-    if not data[0]: return [], []
+# --- CORE FUNCTIONS ---
 
-    eid = data[0].split()[-1]
-    _, d = mail.fetch(eid, '(RFC822)')
-    msg = email.message_from_bytes(d[0][1])
-
-    corpo = ""
-    if msg.is_multipart():
-        for part in msg.walk():
-            if part.get_content_type() == "text/plain":
-                corpo = part.get_payload(decode=True).decode(errors="ignore")
-                break
-    else:
-        corpo = msg.get_payload(decode=True).decode(errors="ignore")
-
-    partes = re.split(r'BELEM:', corpo, flags=re.IGNORECASE)
-    slz = [n.strip() for n in partes[0].replace('SLZ:', '').split('\n') if n.strip() and len(n) > 3]
-    bel = [n.strip() for n in partes[1].split('\n') if n.strip() and len(n) > 3] if len(partes) > 1 else []
-    return slz, bel
-
-# --- BUSCAR EMAILS (PROSPECT) ---
-def buscar_emails(mail):
-    # Tenta selecionar a label, se não existir, vai na Inbox
-    status, _ = mail.select(f'"{LABEL_PROSPECT}"', readonly=True)
-    if status != 'OK': mail.select("INBOX", readonly=True)
-    
-    # Busca e-mails de hoje e ontem (para garantir fuso)
-    hoje_imap = (datetime.now(BR_TZ) - timedelta(days=1)).strftime("%d-%b-%Y")
-    _, data = mail.search(None, f'(SINCE "{hoje_imap}")')
-
-    lista = []
-    if data[0]:
-        for eid in data[0].split()[-100:]:
-            try:
-                _, d = mail.fetch(eid, '(RFC822)')
-                msg = email.message_from_bytes(d[0][1])
-                
-                # Fuso Horário corrigido para o e-mail das 00:10
-                envio_utc = email.utils.parsedate_to_datetime(msg.get("Date"))
-                envio_br = envio_utc.astimezone(BR_TZ)
-
-                # Só aceita se for do dia atual (Brasília)
-                if envio_br.date() != datetime.now(BR_TZ).date():
-                    continue
-
-                subj = "".join(str(c.decode(ch or 'utf-8') if isinstance(c, bytes) else c)
-                               for c, ch in decode_header(msg.get("Subject", ""))).upper()
-
-                corpo = ""
-                if msg.is_multipart():
-                    for part in msg.walk():
-                        if part.get_content_type() == "text/plain":
-                            corpo = part.get_payload(decode=True).decode(errors="ignore")
-                else:
-                    corpo = msg.get_payload(decode=True).decode(errors="ignore")
-
-                lista.append({
-                    "subj": subj,
-                    "date": envio_br,
-                    "info": extrair_datas(corpo)
-                })
-            except: continue
-    return lista
-
-# --- GERAR RELATÓRIO ---
 def gerar_relatorio():
-    mail = conectar_gmail()
-    if not mail: return
+    try:
+        # 1. Conexão
+        mail = imaplib.IMAP4_SSL("imap.gmail.com")
+        mail.login(EMAIL_USER, EMAIL_PASS)
+        
+        # 2. Obter Lista de Navios (E-mail com assunto "LISTA NAVIOS")
+        mail.select("INBOX", readonly=True)
+        _, data_lista = mail.search(None, '(SUBJECT "LISTA NAVIOS")')
+        
+        if not data_lista[0]:
+            st.error("❌ ERRO: E-mail com assunto 'LISTA NAVIOS' não foi encontrado na INBOX.")
+            mail.logout()
+            return
 
-    slz_bruto, bel_bruto = obter_lista_navios(mail)
-    emails = buscar_emails(mail)
-    mail.logout()
+        eid = data_lista[0].split()[-1]
+        _, d = mail.fetch(eid, '(RFC822)')
+        msg_lista = email.message_from_bytes(d[0][1])
+        
+        corpo_lista = ""
+        if msg_lista.is_multipart():
+            for part in msg_lista.walk():
+                if part.get_content_type() == "text/plain":
+                    corpo_lista = part.get_payload(decode=True).decode(errors="ignore")
+                    break
+        else:
+            corpo_lista = msg_lista.get_payload(decode=True).decode(errors="ignore")
 
-    agora_br = datetime.now(BR_TZ)
-    nomes_bel = [limpar_nome(n) for n in bel_bruto]
+        # Split da lista
+        partes = re.split(r'BELEM:', corpo_lista, flags=re.IGNORECASE)
+        slz_bruto = [n.strip() for n in partes[0].replace('SLZ:', '').split('\n') if len(n.strip()) > 3]
+        bel_bruto = [n.strip() for n in partes[1].split('\n') if len(n.strip()) > 3] if len(partes) > 1 else []
 
-    def analisar(lista, is_bel=False):
-        res = []
-        for item in lista:
-            nome = limpar_nome(item)
-            porto = extrair_porto(item)
-            
-            # Filtro de e-mails do navio
-            if is_bel and nomes_bel.count(nome) > 1 and porto:
-                evs = [e for e in emails if nome in e["subj"] and porto in e["subj"]]
-            else:
-                evs = [e for e in emails if nome in e["subj"]]
+        # 3. Buscar e-mails da Label PROSPECT (ou INBOX caso falhe)
+        status_p, _ = mail.select(f'"{LABEL_PROSPECT}"', readonly=True)
+        if status_p != 'OK':
+            mail.select("INBOX", readonly=True)
+            st.warning(f"Pasta '{LABEL_PROSPECT}' não encontrada. Buscando na INBOX...")
 
-            # Status AM/PM
-            manha = any(e["date"].hour < 12 for e in evs)
-            tarde = any(e["date"].hour >= 14 for e in evs) if agora_br.hour >= 14 else False
-            
-            # Datas ETA/ETB/ETD (do e-mail mais recente)
-            dt = {"ETA": "-", "ETB": "-", "ETD": "-"}
-            if evs:
-                evs.sort(key=lambda x: x["date"], reverse=True)
-                dt = evs[0]["info"]
+        # Busca e-mails desde ontem (para fuso 00:10)
+        data_busca = (datetime.now(BR_TZ) - timedelta(days=1)).strftime("%d-%b-%Y")
+        _, data_prospects = mail.search(None, f'(SINCE "{data_busca}")')
 
-            res.append({
-                "Navio": f"{nome} ({porto})" if porto else nome,
-                "Manhã": "✅" if manha else "❌",
-                "Tarde": "✅" if tarde else "❌",
-                "ETA": dt["ETA"], "ETB": dt["ETB"], "ETD": dt["ETD"]
-            })
-        return res
+        emails_encontrados = []
+        hoje_br = datetime.now(BR_TZ).date()
 
-    st.session_state['slz'] = analisar(slz_bruto)
-    st.session_state['bel'] = analisar(bel_bruto, True)
+        if data_prospects[0]:
+            for eid in data_prospects[0].split()[-150:]: # Últimos 150 e-mails
+                try:
+                    _, d = mail.fetch(eid, '(RFC822)')
+                    msg = email.message_from_bytes(d[0][1])
+                    
+                    # Fuso Horário
+                    envio_utc = email.utils.parsedate_to_datetime(msg.get("Date"))
+                    envio_br = envio_utc.astimezone(BR_TZ)
 
-# --- EMAIL ---
+                    if envio_br.date() != hoje_br: continue
+
+                    subj = "".join(str(c.decode(ch or 'utf-8') if isinstance(c, bytes) else c)
+                                   for c, ch in decode_header(msg.get("Subject", ""))).upper()
+
+                    corpo = ""
+                    if msg.is_multipart():
+                        for part in msg.walk():
+                            if part.get_content_type() == "text/plain":
+                                corpo = part.get_payload(decode=True).decode(errors="ignore")
+                    else:
+                        corpo = msg.get_payload(decode=True).decode(errors="ignore")
+
+                    emails_encontrados.append({
+                        "subj": subj, "date": envio_br, "info": extrair_datas(corpo)
+                    })
+                except: continue
+
+        mail.logout()
+
+        # 4. Analisar
+        nomes_bel = [limpar_nome(n) for n in bel_bruto]
+        def processar(lista, is_bel=False):
+            final = []
+            for item in lista:
+                nome = limpar_nome(item)
+                porto = extrair_porto(item)
+                
+                if is_bel and nomes_bel.count(nome) > 1 and porto:
+                    evs = [e for e in emails_encontrados if nome in e["subj"] and porto in e["subj"]]
+                else:
+                    evs = [e for e in emails_encontrados if nome in e["subj"]]
+
+                manha = any(e["date"].hour < 12 for e in evs)
+                tarde = any(e["date"].hour >= 14 for e in evs) if datetime.now(BR_TZ).hour >= 14 else False
+                
+                dt_info = {"ETA": "-", "ETB": "-", "ETD": "-"}
+                if evs:
+                    evs.sort(key=lambda x: x["date"], reverse=True)
+                    dt_info = evs[0]["info"]
+
+                final.append({
+                    "Navio": f"{nome} ({porto})" if porto else nome,
+                    "AM": "✅" if manha else "❌",
+                    "PM": "✅" if tarde else "❌",
+                    "ETA": dt_info["ETA"], "ETB": dt_info["ETB"], "ETD": dt_info["ETD"]
+                })
+            return final
+
+        st.session_state['slz'] = processar(slz_bruto)
+        st.session_state['bel'] = processar(bel_bruto, True)
+        st.success(f"✅ Sucesso! {len(emails_encontrados)} e-mails analisados.")
+
+    except Exception as e:
+        st.error(f"❌ Ocorreu um erro crítico: {e}")
+
+# --- EMAIL SEND ---
 def enviar_email():
     if 'slz' not in st.session_state: return
     try:
         msg = MIMEMultipart()
         msg["From"] = EMAIL_USER
         msg["To"] = ", ".join(DESTINOS)
-        msg["Subject"] = "Monitor Prospects - " + datetime.now(BR_TZ).strftime("%d/%m %H:%M")
+        msg["Subject"] = f"Monitor Prospects - {datetime.now(BR_TZ).strftime('%d/%m %H:%M')}"
 
-        def linhas(lista):
+        def tr_html(lista):
             h = ""
             for r in lista:
-                cm = "#28a745" if r["Manhã"] == "✅" else "#dc3545"
-                ct = "#28a745" if r["Tarde"] == "✅" else "#dc3545"
+                cm = "#28a745" if r["AM"] == "✅" else "#dc3545"
+                ct = "#28a745" if r["PM"] == "✅" else "#dc3545"
                 h += f"<tr><td>{r['Navio']}</td>"
-                h += f"<td style='background:{cm};color:white;text-align:center'>{r['Manhã']}</td>"
-                h += f"<td style='background:{ct};color:white;text-align:center'>{r['Tarde']}</td>"
+                h += f"<td style='background:{cm};color:white;text-align:center'>{r['AM']}</td>"
+                h += f"<td style='background:{ct};color:white;text-align:center'>{r['PM']}</td>"
                 h += f"<td>{r['ETA']}</td><td>{r['ETB']}</td><td>{r['ETD']}</td></tr>"
             return h
 
-        corpo_html = f"""
-        <html><body>
+        html = f"""<html><body>
         <h2>⚓ Monitor Wilson Sons</h2>
         <h3>SÃO LUÍS</h3><table border='1' width='100%'>
         <tr style='background:#eee'><th>Navio</th><th>AM</th><th>PM</th><th>ETA</th><th>ETB</th><th>ETD</th></tr>
-        {linhas(st.session_state['slz'])}</table>
+        {tr_html(st.session_state['slz'])}</table>
+        <br>
         <h3>BELÉM</h3><table border='1' width='100%'>
         <tr style='background:#eee'><th>Navio</th><th>AM</th><th>PM</th><th>ETA</th><th>ETB</th><th>ETD</th></tr>
-        {linhas(st.session_state['bel'])}</table>
+        {tr_html(st.session_state['bel'])}</table>
         </body></html>"""
 
-        msg.attach(MIMEText(corpo_html, "html"))
-        server = smtplib.SMTP("smtp.gmail.com", 587)
-        server.starttls()
-        server.login(EMAIL_USER, EMAIL_PASS)
-        server.send_message(msg)
-        server.quit()
-        st.success("Email enviado!")
-    except Exception as e: st.error(f"Erro email: {e}")
+        msg.attach(MIMEText(html, "html"))
+        with smtplib.SMTP("smtp.gmail.com", 587) as s:
+            s.starttls()
+            s.login(EMAIL_USER, EMAIL_PASS)
+            s.send_message(msg)
+        st.success("📧 E-mail enviado com sucesso!")
+    except Exception as e:
+        st.error(f"Erro no envio de e-mail: {e}")
 
 # --- UI ---
-st.title("🚢 Monitor Wilson Sons")
+st.title("🚢 Monitor Operacional")
 
-# Auto-envio
+# Lógica Auto-Envio
 agora_hm = datetime.now(BR_TZ).strftime("%H:%M")
 if "u_envio" not in st.session_state: st.session_state["u_envio"] = ""
 if agora_hm in HORARIOS and st.session_state["u_envio"] != agora_hm:
@@ -214,9 +205,10 @@ if agora_hm in HORARIOS and st.session_state["u_envio"] != agora_hm:
 
 col1, col2 = st.columns(2)
 with col1:
-    if st.button("🔄 Atualizar Relatório"): gerar_relatorio()
+    if st.button("🔄 Atualizar Relatório", use_container_width=True):
+        gerar_relatorio()
 with col2:
-    if st.button("📧 Atualizar + Enviar"):
+    if st.button("📧 Atualizar + Enviar E-mail", use_container_width=True):
         gerar_relatorio()
         enviar_email()
 
