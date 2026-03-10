@@ -5,33 +5,24 @@ from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from datetime import datetime, timedelta
 from streamlit_autorefresh import st_autorefresh
+import pytz
 
 # --- CONFIGURAÇÕES ---
 EMAIL_USER = "leonardo.alves@wilsonsons.com.br"
 EMAIL_PASS = "nlvr vmyv cbcq oexe"
-
-DESTINOS = [
-    "leonardo.alves@wilsonsons.com.br",
-    "operation.belem@wilsonsons.com.br",
-    "operation.sluis@wilsonsons.com.br"
-]
-
+DESTINOS = ["leonardo.alves@wilsonsons.com.br", "operation.belem@wilsonsons.com.br", "operation.sluis@wilsonsons.com.br"]
 LABEL_PROSPECT = "PROSPECT"
 HORARIOS_ENVIO_EMAIL = ["09:30","10:00","11:00","11:30","16:00","17:00","17:30"]
 
-# Atualiza a página automaticamente a cada 1 minuto
+# Timezone de Brasília
+BR_TIMEZONE = pytz.timezone('America/Sao_Paulo')
+
 st_autorefresh(interval=60000, key="auto_refresh")
 
-# --- FUNÇÕES DE CONEXÃO E PARSING ---
+# --- AUXILIARES ---
 
-def conectar_gmail():
-    try:
-        mail = imaplib.IMAP4_SSL("imap.gmail.com")
-        mail.login(EMAIL_USER, EMAIL_PASS)
-        return mail
-    except Exception as e:
-        st.error(f"Erro de conexão Gmail: {e}")
-        return None
+def obter_agora_br():
+    return datetime.now(BR_TIMEZONE)
 
 def limpar_nome(txt):
     n = re.sub(r'^(MV|M/V|MT|M/T)\s+', '', txt.strip(), flags=re.IGNORECASE)
@@ -46,30 +37,31 @@ def extrair_porto(txt):
     return m.group(1).strip().upper() if m else None
 
 def extrair_datas_corpo(corpo):
-    """
-    Busca datas após ETA, ETB ou ETD no corpo do e-mail.
-    Suporta: 10/03, 10/03/2026, 10-MAR, 10-MAR 08:00, etc.
-    """
     info = {"ETA": "-", "ETB": "-", "ETD": "-"}
-    if not corpo:
-        return info
-
+    if not corpo: return info
     for chave in info.keys():
-        # Regex procura a sigla + caracteres opcionais + formato de data (dd/mm ou dd-mon)
-        padrao = rf"{chave}\s*[:\-]?\s*(\d{{1,2}}[/|-](?:\d{{1,2}}|[A-Z]{{3}})(?:[/|-]\d{{2,4}})?(?:\s+\d{{2}}:\d{{2}})?) "
+        # Regex melhorada: busca a chave e tenta pegar a data/hora logo após
+        padrao = rf"{chave}\s*[:\-]?\s*(\d{{1,2}}[/|-](?:\d{{1,2}}|[A-Z]{{3}})(?:[/|-]\d{{2,4}})?(?:\s*\d{{2}}:\d{{2}})?) "
         match = re.search(padrao, corpo, re.IGNORECASE)
         if match:
             info[chave] = match.group(1).strip().upper()
-    
     return info
 
-# --- BUSCA DE DADOS ---
+# --- IMAP ---
+
+def conectar_gmail():
+    try:
+        mail = imaplib.IMAP4_SSL("imap.gmail.com")
+        mail.login(EMAIL_USER, EMAIL_PASS)
+        return mail
+    except Exception as e:
+        st.error(f"Erro Gmail: {e}")
+        return None
 
 def obter_lista_navios(mail):
     mail.select("INBOX", readonly=True)
     _, data = mail.search(None, '(SUBJECT "LISTA NAVIOS")')
-    if not data[0]:
-        return [], []
+    if not data[0]: return [], []
 
     eid = data[0].split()[-1]
     _, d = mail.fetch(eid, '(RFC822)')
@@ -86,34 +78,37 @@ def obter_lista_navios(mail):
 
     corpo = re.split(r'Regards|Best regards', corpo, flags=re.IGNORECASE)[0]
     partes = re.split(r'BELEM:', corpo, flags=re.IGNORECASE)
-
     slz = [n.strip() for n in partes[0].replace('SLZ:', '').split('\n') if n.strip()]
     bel = [n.strip() for n in partes[1].split('\n') if n.strip()] if len(partes) > 1 else []
-
     return slz, bel
 
 def buscar_emails(mail):
     mail.select(f'"{LABEL_PROSPECT}"', readonly=True)
-    hoje = (datetime.now() - timedelta(hours=3)).strftime("%d-%b-%Y")
-    _, data = mail.search(None, f'(SINCE "{hoje}")')
+    # Buscamos desde ontem para garantir que e-mails da madrugada (00:10) sejam capturados
+    ontem = (obter_agora_br() - timedelta(days=1)).strftime("%d-%b-%Y")
+    _, data = mail.search(None, f'(SINCE "{ontem}")')
 
     lista = []
+    hoje_br = obter_agora_br().date()
+
     if data[0]:
-        # Pegamos os últimos e-mails para processar
         for eid in data[0].split()[-150:]:
             try:
                 _, d = mail.fetch(eid, '(RFC822)')
                 msg = email.message_from_bytes(d[0][1])
+                
+                # Conversão correta de fuso
+                date_str = msg.get("Date")
+                envio_utc = email.utils.parsedate_to_datetime(date_str)
+                envio_br = envio_utc.astimezone(BR_TIMEZONE)
 
-                subj = "".join(
-                    str(c.decode(ch or 'utf-8') if isinstance(c, bytes) else c)
-                    for c, ch in decode_header(msg.get("Subject", ""))
-                ).upper()
+                # Filtro: Só queremos e-mails que caíram no dia de HOJE (Brasília)
+                if envio_br.date() != hoje_br:
+                    continue
 
-                envio_utc = email.utils.parsedate_to_datetime(msg.get("Date"))
-                envio_br = envio_utc - timedelta(hours=3)
+                subj = "".join(str(c.decode(ch or 'utf-8') if isinstance(c, bytes) else c)
+                               for c, ch in decode_header(msg.get("Subject", ""))).upper()
 
-                # Extração do corpo para pegar ETA/ETB/ETD
                 corpo = ""
                 if msg.is_multipart():
                     for part in msg.walk():
@@ -125,14 +120,14 @@ def buscar_emails(mail):
 
                 lista.append({
                     "subj": subj,
-                    "date": envio_br.replace(tzinfo=None),
-                    "datas_operacionais": extrair_datas_corpo(corpo)
+                    "date": envio_br,
+                    "datas_op": extrair_datas_corpo(corpo)
                 })
             except:
                 continue
     return lista
 
-# --- PROCESSAMENTO ---
+# --- LÓGICA ---
 
 def gerar_relatorio():
     mail = conectar_gmail()
@@ -142,8 +137,8 @@ def gerar_relatorio():
     emails_prospect = buscar_emails(mail)
     mail.logout()
 
+    agora_br = obter_agora_br()
     nomes_base_bel = [limpar_nome(n) for n in bel_bruto]
-    agora_br = datetime.now() - timedelta(hours=3)
 
     def analisar(lista_origem, is_belem=False):
         res = []
@@ -151,36 +146,35 @@ def gerar_relatorio():
             nome = limpar_nome(item)
             porto = extrair_porto(item)
 
-            # Filtra emails que mencionam este navio
             if is_belem and nomes_base_bel.count(nome) > 1 and porto:
                 emails_vessel = [e for e in emails_prospect if nome in e["subj"] and porto in e["subj"]]
             else:
                 emails_vessel = [e for e in emails_prospect if nome in e["subj"]]
 
-            # Status de envio
+            # Critério: Manhã (00:00 às 11:59) / Tarde (14:00 em diante)
             manha = any(e["date"].hour < 12 for e in emails_vessel)
             tarde = any(e["date"].hour >= 14 for e in emails_vessel) if agora_br.hour >= 14 else False
 
-            # Pega datas do e-mail mais recente recebido hoje
-            datas = {"ETA": "-", "ETB": "-", "ETD": "-"}
+            # Pegar dados do e-mail mais recente deste navio
+            datas_info = {"ETA": "-", "ETB": "-", "ETD": "-"}
             if emails_vessel:
                 emails_vessel.sort(key=lambda x: x["date"], reverse=True)
-                datas = emails_vessel[0]["datas_operacionais"]
+                datas_info = emails_vessel[0]["datas_op"]
 
             res.append({
                 "Navio": f"{nome} ({porto})" if porto else nome,
                 "Manhã": "✅" if manha else "❌",
                 "Tarde": "✅" if tarde else "❌",
-                "ETA": datas["ETA"],
-                "ETB": datas["ETB"],
-                "ETD": datas["ETD"]
+                "ETA": datas_info["ETA"],
+                "ETB": datas_info["ETB"],
+                "ETD": datas_info["ETD"]
             })
         return res
 
     st.session_state['slz'] = analisar(slz_bruto)
     st.session_state['bel'] = analisar(bel_bruto, True)
 
-# --- INTERFACE E ENVIO ---
+# --- EMAIL ---
 
 def enviar_email():
     if 'slz' not in st.session_state: return
@@ -188,88 +182,13 @@ def enviar_email():
         msg = MIMEMultipart()
         msg["From"] = EMAIL_USER
         msg["To"] = ", ".join(DESTINOS)
-        msg["Subject"] = f"Monitor Prospects - {datetime.now().strftime('%d/%m %H:%M')}"
+        msg["Subject"] = f"Monitor Prospects - {obter_agora_br().strftime('%d/%m %H:%M')}"
 
-        def formatar_tabela_html(lista):
+        def build_rows(lista):
             rows = ""
             for r in lista:
-                c_m = "#28a745" if r["Manhã"] == "✅" else "#dc3545"
-                c_t = "#28a745" if r["Tarde"] == "✅" else "#dc3545"
-                rows += f"""
-                <tr>
-                    <td style="padding:8px; border:1px solid #ddd">{r['Navio']}</td>
-                    <td style="background:{c_m}; color:white; text-align:center; width:40px">{r['Manhã']}</td>
-                    <td style="background:{c_t}; color:white; text-align:center; width:40px">{r['Tarde']}</td>
-                    <td style="padding:8px; border:1px solid #ddd; text-align:center">{r['ETA']}</td>
-                    <td style="padding:8px; border:1px solid #ddd; text-align:center">{r['ETB']}</td>
-                    <td style="padding:8px; border:1px solid #ddd; text-align:center">{r['ETD']}</td>
-                </tr>"""
-            return rows
-
-        html = f"""
-        <html><body style="font-family:Arial; color:#333;">
-            <h2 style="color:#2b6cb0;">🚢 Status de Monitoramento Wilson Sons</h2>
-            <h3>São Luís (SLZ)</h3>
-            <table border="1" style="border-collapse:collapse; width:100%">
-                <tr style="background:#f2f2f2"><th>Navio</th><th>AM</th><th>PM</th><th>ETA</th><th>ETB</th><th>ETD</th></tr>
-                {formatar_tabela_html(st.session_state['slz'])}
-            </table>
-            <br>
-            <h3>Belém (BEL)</h3>
-            <table border="1" style="border-collapse:collapse; width:100%">
-                <tr style="background:#f2f2f2"><th>Navio</th><th>AM</th><th>PM</th><th>ETA</th><th>ETB</th><th>ETD</th></tr>
-                {formatar_tabela_html(st.session_state['bel'])}
-            </table>
-        </body></html>"""
-
-        msg.attach(MIMEText(html, "html"))
-        with smtplib.SMTP("smtp.gmail.com", 587) as server:
-            server.starttls()
-            server.login(EMAIL_USER, EMAIL_PASS)
-            server.send_message(msg)
-        st.success("📧 Relatório enviado com sucesso!")
-    except Exception as e:
-        st.error(f"Erro ao enviar e-mail: {e}")
-
-# --- LÓGICA DE EXECUÇÃO ---
-
-st.set_page_config(page_title="Monitor Wilson Sons", layout="wide")
-st.title("🚢 Monitor Operacional Wilson Sons")
-
-# Controle de envio automático
-agora = (datetime.now() - timedelta(hours=3)).strftime("%H:%M")
-if "ultimo_envio" not in st.session_state: st.session_state["ultimo_envio"] = ""
-
-if agora in HORARIOS_ENVIO_EMAIL and st.session_state["ultimo_envio"] != agora:
-    gerar_relatorio()
-    enviar_email()
-    st.session_state["ultimo_envio"] = agora
-
-# UI de botões
-c1, c2 = st.columns(2)
-with c1:
-    if st.button("🔄 Atualizar Dados", use_container_width=True):
-        gerar_relatorio()
-with c2:
-    if st.button("📧 Forçar Envio de Email", use_container_width=True):
-        gerar_relatorio()
-        enviar_email()
-
-# Exibição das Tabelas
-if 'slz' in st.session_state:
-    for local, chave in [("📍 São Luís", "slz"), ("📍 Belém", "bel")]:
-        st.header(local)
-        
-        # Tabela de Status e Cronograma unificada para melhor visualização
-        st.dataframe(
-            st.session_state[chave], 
-            column_config={
-                "Manhã": st.column_config.TextColumn("AM", width="small"),
-                "Tarde": st.column_config.TextColumn("PM", width="small"),
-                "ETA": st.column_config.TextColumn("Prev. Chegada (ETA)"),
-                "ETB": st.column_config.TextColumn("Prev. Berço (ETB)"),
-                "ETD": st.column_config.TextColumn("Prev. Saída (ETD)"),
-            },
-            use_container_width=True,
-            hide_index=True
-        )
+                cm = "#28a745" if r["Manhã"] == "✅" else "#dc3545"
+                ct = "#28a745" if r["Tarde"] == "✅" else "#dc3545"
+                rows += f"""<tr>
+                    <td style="padding:5px; border:1px solid #ccc">{r['Navio']}</td>
+                    <td style="background:{cm}; color:white; text-align:center">{
