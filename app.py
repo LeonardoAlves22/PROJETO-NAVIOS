@@ -34,31 +34,30 @@ def extrair_porto(txt):
 
 def extrair_datas_prospect(corpo):
     """
-    Busca datas de forma flexível. 
-    Ex: 'ETA: 14/03' ou 'ETB....MAR 15TH' ou 'ETD 16-03'
+    Extrai datas de prospects estruturados (como na imagem enviada).
+    Busca a sigla e captura a data que aparece logo em seguida, mesmo em outra linha.
     """
     res = {"ETA": "-", "ETB": "-", "ETD": "-"}
     if not corpo: return res
     
-    # Limpa caracteres especiais de tabelas para facilitar a busca
-    corpo_limpo = corpo.upper().replace('.', ' ').replace('_', ' ')
+    # Remove quebras de linha excessivas e espaços duplos para "aproximar" os dados
+    corpo_normalizado = " ".join(corpo.upper().split())
     
+    # Regex para capturar formatos como "MAR 21ST, 2026" ou "MAR 21ST" ou "21/03"
+    # Procuramos a sigla e pegamos a data que vier depois (até 50 caracteres de distância)
     for k in res.keys():
-        # Busca a sigla (ETA/ETB/ETD) e tenta pegar a data na mesma linha (até 30 caracteres depois)
-        # Padrão: Sigla + qualquer coisa que não seja quebra de linha + Data (DD/MM ou MES DD)
-        padrao = rf"{k}\s*[:\-]*\s*([A-Z]{{3,}}\s+\d{{1,2}}|\d{{1,2}}[/|-](?:\d{{1,2}}|[A-Z]{{3}})[^ \n\r]*)"
-        m = re.search(padrao, corpo_limpo)
+        # Captura: Mes (3 letras) + Espaço + Dia (1-2 digitos) + Opcional(st,nd,rd,th)
+        padrao = rf"{k}\s+([A-Z]{{3}}\s+\d{{1,2}}(?:ST|ND|RD|TH)?(?:,?\s+\d{{4}})?|\d{{1,2}}[/|-]\d{{1,2}})"
+        m = re.search(padrao, corpo_normalizado)
         
         if m:
             res[k] = m.group(1).strip()
-        else:
-            # Fallback: Se não achar com o padrão acima, tenta buscar a data mais próxima após a sigla
-            # Isso ajuda em tabelas onde os dados estão afastados
-            fallback = rf"{k}.*?(\d{{1,2}}[/|-]\d{{1,2}}|[A-Z]{{3,}}\s+\d{{1,2}})"
-            m2 = re.search(fallback, corpo_limpo, re.DOTALL)
-            if m2:
-                res[k] = m2.group(1).strip()
-                
+    
+    # Se ainda estiver "-" para ETD, tenta buscar ETS (que às vezes substitui ETD em alguns lineups)
+    if res["ETD"] == "-":
+        m_ets = re.search(r"ETS\s+([A-Z]{{3}}\s+\d{{1,2}}(?:ST|ND|RD|TH)?(?:,?\s+\d{{4}})?|\d{{1,2}}[/|-]\d{{1,2}})", corpo_normalizado)
+        if m_ets: res["ETD"] = m_ets.group(1).strip()
+
     return res
 
 # --- MOTOR DE BUSCA ---
@@ -136,15 +135,15 @@ def buscar_dados():
         return None, None, str(e)
 
 # --- INTERFACE ---
-st.set_page_config(page_title="Monitor Wilson Sons", layout="wide")
+st.set_page_config(page_title="Monitor Operacional WS", layout="wide")
 st.title("🚢 Monitor Operacional - Wilson Sons")
 
 if 'slz_tab' not in st.session_state: st.session_state.slz_tab = []
 if 'bel_tab' not in st.session_state: st.session_state.bel_tab = []
 if 'last_up' not in st.session_state: st.session_state.last_up = "-"
 
-if st.button("🔄 ATUALIZAR AGORA", use_container_width=True, type="primary"):
-    with st.spinner("Extraindo datas dos e-mails..."):
+if st.button("🔄 ATUALIZAR DADOS", use_container_width=True, type="primary"):
+    with st.spinner("Lendo e-mails e extraindo datas..."):
         slz, bel, prospects = buscar_dados()
         
         if isinstance(prospects, str):
@@ -162,11 +161,10 @@ if st.button("🔄 ATUALIZAR AGORA", use_container_width=True, type="primary"):
                     
                     vessel_emails.sort(key=lambda x: x["date"], reverse=True)
                     
-                    # Horário: AM até 13h00 | PM após 13h00
+                    # AM: até 13h | PM: após 13h
                     am_check = any(e["date"].hour < 13 for e in vessel_emails)
                     pm_check = any(e["date"].hour >= 13 for e in vessel_emails)
                     
-                    # Pega a info do e-mail mais RECENTE de hoje para este navio
                     info = vessel_emails[0]["datas"] if vessel_emails else {"ETA": "-", "ETB": "-", "ETD": "-"}
                     
                     res.append({
@@ -189,4 +187,4 @@ if st.session_state.slz_tab or st.session_state.bel_tab:
     with t1: st.table(st.session_state.slz_tab)
     with t2: st.table(st.session_state.bel_tab)
 else:
-    st.info("Clique em 'ATUALIZAR AGORA'.")
+    st.info("Aguardando sincronização inicial.")
