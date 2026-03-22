@@ -11,7 +11,6 @@ EMAIL_PASS = "nlvr vmyv cbcq oexe"
 LABEL_PROSPECT = "PROSPECT"
 BR_TZ = pytz.timezone('America/Sao_Paulo')
 
-# Refresh automático a cada 5 minutos para evitar gargalo no Gmail
 st_autorefresh(interval=300000, key="auto_refresh")
 
 # --- FUNÇÕES DE APOIO ---
@@ -34,14 +33,32 @@ def extrair_porto(txt):
     return m.group(1).strip().upper() if m else None
 
 def extrair_datas_prospect(corpo):
+    """
+    Busca datas de forma flexível. 
+    Ex: 'ETA: 14/03' ou 'ETB....MAR 15TH' ou 'ETD 16-03'
+    """
     res = {"ETA": "-", "ETB": "-", "ETD": "-"}
     if not corpo: return res
-    corpo = corpo.upper()
+    
+    # Limpa caracteres especiais de tabelas para facilitar a busca
+    corpo_limpo = corpo.upper().replace('.', ' ').replace('_', ' ')
+    
     for k in res.keys():
-        padrao = rf"{k}\s*[:\-]?\s*([A-Z]{{3,}}\s+\d{{1,2}}|\d{{1,2}}[/|-](?:\d{{1,2}}|[A-Z]{{3}})[^ \n\r]*)"
-        m = re.search(padrao, corpo)
+        # Busca a sigla (ETA/ETB/ETD) e tenta pegar a data na mesma linha (até 30 caracteres depois)
+        # Padrão: Sigla + qualquer coisa que não seja quebra de linha + Data (DD/MM ou MES DD)
+        padrao = rf"{k}\s*[:\-]*\s*([A-Z]{{3,}}\s+\d{{1,2}}|\d{{1,2}}[/|-](?:\d{{1,2}}|[A-Z]{{3}})[^ \n\r]*)"
+        m = re.search(padrao, corpo_limpo)
+        
         if m:
             res[k] = m.group(1).strip()
+        else:
+            # Fallback: Se não achar com o padrão acima, tenta buscar a data mais próxima após a sigla
+            # Isso ajuda em tabelas onde os dados estão afastados
+            fallback = rf"{k}.*?(\d{{1,2}}[/|-]\d{{1,2}}|[A-Z]{{3,}}\s+\d{{1,2}})"
+            m2 = re.search(fallback, corpo_limpo, re.DOTALL)
+            if m2:
+                res[k] = m2.group(1).strip()
+                
     return res
 
 # --- MOTOR DE BUSCA ---
@@ -87,7 +104,6 @@ def buscar_dados():
         hoje_br = datetime.now(BR_TZ).date()
 
         if data_p[0]:
-            # Limite de 50 e-mails para máxima velocidade
             ids = data_p[0].split()[-50:] 
             for eid in ids:
                 try:
@@ -101,8 +117,10 @@ def buscar_dados():
                         corpo = ""
                         if m.is_multipart():
                             for p in m.walk():
-                                if p.get_content_type() == "text/plain": corpo = p.get_payload(decode=True).decode(errors="ignore")
-                        else: corpo = m.get_payload(decode=True).decode(errors="ignore")
+                                if p.get_content_type() == "text/plain": 
+                                    corpo = p.get_payload(decode=True).decode(errors="ignore")
+                        else: 
+                            corpo = m.get_payload(decode=True).decode(errors="ignore")
                         
                         prospects_list.append({
                             "subj": subj, 
@@ -126,7 +144,7 @@ if 'bel_tab' not in st.session_state: st.session_state.bel_tab = []
 if 'last_up' not in st.session_state: st.session_state.last_up = "-"
 
 if st.button("🔄 ATUALIZAR AGORA", use_container_width=True, type="primary"):
-    with st.spinner("Sincronizando com Gmail (Últimos 50)..."):
+    with st.spinner("Extraindo datas dos e-mails..."):
         slz, bel, prospects = buscar_dados()
         
         if isinstance(prospects, str):
@@ -138,25 +156,26 @@ if st.button("🔄 ATUALIZAR AGORA", use_container_width=True, type="primary"):
                     n_limpo = limpar_nome(navio_bruto)
                     p_limpo = extrair_porto(navio_bruto)
                     
-                    # Filtra e-mails do navio recebidos HOJE
                     vessel_emails = [e for e in prospects if n_limpo in e["subj"]]
                     if is_bel and p_limpo:
                         vessel_emails = [e for e in vessel_emails if p_limpo in e["subj"]]
                     
                     vessel_emails.sort(key=lambda x: x["date"], reverse=True)
                     
-                    # NOVA REGRA DE HORÁRIO:
-                    # AM: e-mail enviado até 13h00 | PM: e-mail enviado após 13h00
+                    # Horário: AM até 13h00 | PM após 13h00
                     am_check = any(e["date"].hour < 13 for e in vessel_emails)
                     pm_check = any(e["date"].hour >= 13 for e in vessel_emails)
                     
+                    # Pega a info do e-mail mais RECENTE de hoje para este navio
                     info = vessel_emails[0]["datas"] if vessel_emails else {"ETA": "-", "ETB": "-", "ETD": "-"}
                     
                     res.append({
                         "Navio": f"{n_limpo} ({p_limpo})" if p_limpo else n_limpo,
                         "AM (até 13h)": "✅" if am_check else "❌",
                         "PM (pós 13h)": "✅" if pm_check else "❌",
-                        "ETA": info["ETA"], "ETB": info["ETB"], "ETD": info["ETD"]
+                        "ETA": info["ETA"], 
+                        "ETB": info["ETB"], 
+                        "ETD": info["ETD"]
                     })
                 return res
 
@@ -170,4 +189,4 @@ if st.session_state.slz_tab or st.session_state.bel_tab:
     with t1: st.table(st.session_state.slz_tab)
     with t2: st.table(st.session_state.bel_tab)
 else:
-    st.info("Aguardando carregamento. Clique em 'ATUALIZAR AGORA'.")
+    st.info("Clique em 'ATUALIZAR AGORA'.")
