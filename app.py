@@ -1,5 +1,5 @@
 import streamlit as st
-import imaplib, email, re, smtplib
+import imaplib, email, re
 from email.header import decode_header
 from datetime import datetime, timedelta
 from streamlit_autorefresh import st_autorefresh
@@ -11,7 +11,7 @@ EMAIL_PASS = "nlvr vmyv cbcq oexe"
 LABEL_PROSPECT = "PROSPECT"
 BR_TZ = pytz.timezone('America/Sao_Paulo')
 
-# Atualização automática a cada 5 minutos (evita bloqueio do Gmail por excesso de login)
+# Refresh automático a cada 5 minutos para evitar gargalo no Gmail
 st_autorefresh(interval=300000, key="auto_refresh")
 
 # --- FUNÇÕES DE APOIO ---
@@ -37,23 +37,21 @@ def extrair_datas_prospect(corpo):
     res = {"ETA": "-", "ETB": "-", "ETD": "-"}
     if not corpo: return res
     corpo = corpo.upper()
-    
     for k in res.keys():
-        # Regex melhorado para capturar datas em diversos formatos após a sigla
         padrao = rf"{k}\s*[:\-]?\s*([A-Z]{{3,}}\s+\d{{1,2}}|\d{{1,2}}[/|-](?:\d{{1,2}}|[A-Z]{{3}})[^ \n\r]*)"
         m = re.search(padrao, corpo)
         if m:
             res[k] = m.group(1).strip()
     return res
 
-# --- FUNÇÃO DE CONEXÃO E BUSCA ---
+# --- MOTOR DE BUSCA ---
 
 def buscar_dados():
     try:
         mail = imaplib.IMAP4_SSL("imap.gmail.com", timeout=20)
         mail.login(EMAIL_USER, EMAIL_PASS)
         
-        # 1. LISTA NAVIOS
+        # 1. LISTA NAVIOS (Inbox)
         mail.select("INBOX", readonly=True)
         _, data_lista = mail.search(None, '(SUBJECT "LISTA NAVIOS")')
         if not data_lista[0]: return None, None, "E-mail 'LISTA NAVIOS' não encontrado."
@@ -80,16 +78,17 @@ def buscar_dados():
                 if line and not e_assinatura(line): bel_bruto.append(line)
                 elif line and e_assinatura(line) and len(bel_bruto) > 0: break
 
-        # 2. PROSPECTS
+        # 2. PROSPECTS (Hoje)
         mail.select(f'"{LABEL_PROSPECT}"', readonly=True)
-        hoje_busca = (datetime.now(BR_TZ) - timedelta(days=1)).strftime("%d-%b-%Y")
-        _, data_p = mail.search(None, f'(SINCE "{hoje_busca}")')
+        hoje_str = datetime.now(BR_TZ).strftime("%d-%b-%Y")
+        _, data_p = mail.search(None, f'(SINCE "{hoje_str}")')
         
         prospects_list = []
         hoje_br = datetime.now(BR_TZ).date()
 
         if data_p[0]:
-            ids = data_p[0].split()[-100:] # Analisa os últimos 100 e-mails
+            # Limite de 50 e-mails para máxima velocidade
+            ids = data_p[0].split()[-50:] 
             for eid in ids:
                 try:
                     _, d = mail.fetch(eid, '(RFC822)')
@@ -121,51 +120,3 @@ def buscar_dados():
 # --- INTERFACE ---
 st.set_page_config(page_title="Monitor Wilson Sons", layout="wide")
 st.title("🚢 Monitor Operacional - Wilson Sons")
-
-# Inicializa Session State
-if 'slz_tab' not in st.session_state: st.session_state.slz_tab = []
-if 'bel_tab' not in st.session_state: st.session_state.bel_tab = []
-if 'last_up' not in st.session_state: st.session_state.last_up = "-"
-
-if st.button("🔄 ATUALIZAR DADOS AGORA", use_container_width=True, type="primary"):
-    with st.spinner("Conectando ao Gmail..."):
-        slz_bruto, bel_bruto, prospects = buscar_dados()
-        
-        if isinstance(prospects, str):
-            st.error(f"Erro: {prospects}")
-        elif slz_bruto is not None:
-            def montar(lista, is_bel=False):
-                res = []
-                for item in lista:
-                    n_limpo = limpar_nome(item)
-                    p_limpo = extrair_porto(item)
-                    
-                    # Filtra e-mails do navio
-                    vessel_emails = [e for e in prospects if n_limpo in e["subj"]]
-                    if is_bel and p_limpo:
-                        vessel_emails = [e for e in vessel_emails if p_limpo in e["subj"]]
-                    
-                    vessel_emails.sort(key=lambda x: x["date"], reverse=True)
-                    info = vessel_emails[0]["datas"] if vessel_emails else {"ETA": "-", "ETB": "-", "ETD": "-"}
-                    
-                    res.append({
-                        "Navio": f"{n_limpo} ({p_limpo})" if p_limpo else n_limpo,
-                        "Manhã (AM)": "✅" if any(e["date"].hour < 12 for e in vessel_emails) else "❌",
-                        "Tarde (PM)": "✅" if any(e["date"].hour >= 14 for e in vessel_emails) else "❌",
-                        "ETA": info["ETA"], "ETB": info["ETB"], "ETD": info["ETD"]
-                    })
-                return res
-
-            st.session_state.slz_tab = montar(slz_bruto)
-            st.session_state.bel_tab = montar(bel_bruto, True)
-            st.session_state.last_up = datetime.now(BR_TZ).strftime("%H:%M:%S")
-            st.success(f"Atualizado às {st.session_state.last_up}")
-
-# Exibição
-if st.session_state.slz_tab or st.session_state.bel_tab:
-    st.caption(f"Última sincronização: {st.session_state.last_up}")
-    t1, t2 = st.tabs(["📍 São Luís", "📍 Belém"])
-    with t1: st.table(st.session_state.slz_tab)
-    with t2: st.table(st.session_state.bel_tab)
-else:
-    st.info("Clique no botão acima para carregar os dados do Gmail.")
