@@ -120,3 +120,54 @@ def buscar_dados():
 # --- INTERFACE ---
 st.set_page_config(page_title="Monitor Wilson Sons", layout="wide")
 st.title("🚢 Monitor Operacional - Wilson Sons")
+
+if 'slz_tab' not in st.session_state: st.session_state.slz_tab = []
+if 'bel_tab' not in st.session_state: st.session_state.bel_tab = []
+if 'last_up' not in st.session_state: st.session_state.last_up = "-"
+
+if st.button("🔄 ATUALIZAR AGORA", use_container_width=True, type="primary"):
+    with st.spinner("Sincronizando com Gmail (Últimos 50)..."):
+        slz, bel, prospects = buscar_dados()
+        
+        if isinstance(prospects, str):
+            st.error(f"Erro: {prospects}")
+        elif slz is not None:
+            def montar(lista_navios, is_bel=False):
+                res = []
+                for navio_bruto in lista_navios:
+                    n_limpo = limpar_nome(navio_bruto)
+                    p_limpo = extrair_porto(navio_bruto)
+                    
+                    # Filtra e-mails do navio recebidos HOJE
+                    vessel_emails = [e for e in prospects if n_limpo in e["subj"]]
+                    if is_bel and p_limpo:
+                        vessel_emails = [e for e in vessel_emails if p_limpo in e["subj"]]
+                    
+                    vessel_emails.sort(key=lambda x: x["date"], reverse=True)
+                    
+                    # NOVA REGRA DE HORÁRIO:
+                    # AM: e-mail enviado até 13h00 | PM: e-mail enviado após 13h00
+                    am_check = any(e["date"].hour < 13 for e in vessel_emails)
+                    pm_check = any(e["date"].hour >= 13 for e in vessel_emails)
+                    
+                    info = vessel_emails[0]["datas"] if vessel_emails else {"ETA": "-", "ETB": "-", "ETD": "-"}
+                    
+                    res.append({
+                        "Navio": f"{n_limpo} ({p_limpo})" if p_limpo else n_limpo,
+                        "AM (até 13h)": "✅" if am_check else "❌",
+                        "PM (pós 13h)": "✅" if pm_check else "❌",
+                        "ETA": info["ETA"], "ETB": info["ETB"], "ETD": info["ETD"]
+                    })
+                return res
+
+            st.session_state.slz_tab = montar(slz)
+            st.session_state.bel_tab = montar(bel, True)
+            st.session_state.last_up = datetime.now(BR_TZ).strftime("%H:%M:%S")
+
+if st.session_state.slz_tab or st.session_state.bel_tab:
+    st.write(f"Última atualização: **{st.session_state.last_up}**")
+    t1, t2 = st.tabs(["📍 São Luís", "📍 Belém"])
+    with t1: st.table(st.session_state.slz_tab)
+    with t2: st.table(st.session_state.bel_tab)
+else:
+    st.info("Aguardando carregamento. Clique em 'ATUALIZAR AGORA'.")
