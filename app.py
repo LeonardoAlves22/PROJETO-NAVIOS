@@ -15,11 +15,10 @@ st_autorefresh(interval=300000, key="auto_refresh")
 
 # --- FUNÇÕES DE APOIO ---
 
-def e_assinatura(texto):
-    proibidos = ['REGARDS', 'ATENCIOSAMENTE', 'OBRIGADO', 'THANKS', 'WILSON', 'SONS', 'MOBILE', 'PHONE', '.COM', 'CARGO', 'GERENTE', 'COORDENADOR', 'WWW.', 'HTTPS:']
-    t_up = texto.upper()
-    if len(texto) > 45 or len(texto) < 3: return True
-    return any(termo in t_up for termo in proibidos)
+def limpar_html(html):
+    """Remove tags HTML e excesso de espaços para deixar apenas o texto bruto"""
+    texto = re.sub(r'<[^>]+>', ' ', html)
+    return " ".join(texto.split())
 
 def limpar_nome(txt):
     n = re.sub(r'^(MV|M/V|MT|M/T)\s+', '', txt.strip(), flags=re.IGNORECASE)
@@ -34,65 +33,55 @@ def extrair_porto(txt):
 
 def extrair_datas_prospect(corpo):
     """
-    Extrai datas de prospects estruturados (como na imagem enviada).
-    Busca a sigla e captura a data que aparece logo em seguida, mesmo em outra linha.
+    Busca datas de forma ultra-flexível após as siglas ETA/ETB/ETD/ETS.
     """
     res = {"ETA": "-", "ETB": "-", "ETD": "-"}
     if not corpo: return res
     
-    # Remove quebras de linha excessivas e espaços duplos para "aproximar" os dados
-    corpo_normalizado = " ".join(corpo.upper().split())
+    # Normaliza o texto para busca
+    txt = corpo.upper()
     
-    # Regex para capturar formatos como "MAR 21ST, 2026" ou "MAR 21ST" ou "21/03"
-    # Procuramos a sigla e pegamos a data que vier depois (até 50 caracteres de distância)
-    for k in res.keys():
-        # Captura: Mes (3 letras) + Espaço + Dia (1-2 digitos) + Opcional(st,nd,rd,th)
-        padrao = rf"{k}\s+([A-Z]{{3}}\s+\d{{1,2}}(?:ST|ND|RD|TH)?(?:,?\s+\d{{4}})?|\d{{1,2}}[/|-]\d{{1,2}})"
-        m = re.search(padrao, corpo_normalizado)
+    # Regex para capturar: Sigla + (qualquer coisa ate 40 caracteres) + (Data formato Mar 21st ou 21/03)
+    # Pegamos o primeiro grupo de data que aparecer após a sigla
+    for k in ["ETA", "ETB", "ETD", "ETS"]:
+        # Busca a sigla e olha os próximos 60 caracteres em busca de uma data
+        padrao = rf"{k}\s+.*?([A-Z]{{3}}\s+\d{{1,2}}(?:ST|ND|RD|TH)?(?:,?\s+\d{{4}})?|\d{{1,2}}[/|-]\d{{1,2}})"
+        m = re.search(padrao, txt)
         
-        if m:
-            res[k] = m.group(1).strip()
-    
-    # Se ainda estiver "-" para ETD, tenta buscar ETS (que às vezes substitui ETD em alguns lineups)
-    if res["ETD"] == "-":
-        m_ets = re.search(r"ETS\s+([A-Z]{{3}}\s+\d{{1,2}}(?:ST|ND|RD|TH)?(?:,?\s+\d{{4}})?|\d{{1,2}}[/|-]\d{{1,2}})", corpo_normalizado)
-        if m_ets: res["ETD"] = m_ets.group(1).strip()
-
+        chave_destino = "ETD" if k == "ETS" else k
+        if m and res[chave_destino] == "-":
+            res[chave_destino] = m.group(1).strip()
+                
     return res
 
 # --- MOTOR DE BUSCA ---
 
 def buscar_dados():
     try:
-        mail = imaplib.IMAP4_SSL("imap.gmail.com", timeout=20)
+        mail = imaplib.IMAP4_SSL("imap.gmail.com", timeout=25)
         mail.login(EMAIL_USER, EMAIL_PASS)
         
-        # 1. LISTA NAVIOS (Inbox)
+        # 1. LISTA NAVIOS
         mail.select("INBOX", readonly=True)
         _, data_lista = mail.search(None, '(SUBJECT "LISTA NAVIOS")')
-        if not data_lista[0]: return None, None, "E-mail 'LISTA NAVIOS' não encontrado."
-
-        eid = data_lista[0].split()[-1]
-        _, d = mail.fetch(eid, '(RFC822)')
-        msg_lista = email.message_from_bytes(d[0][1])
+        slz_bruto, bel_bruto = [], []
         
-        corpo_lista = ""
-        if msg_lista.is_multipart():
-            for part in msg_lista.walk():
-                if part.get_content_type() == "text/plain":
-                    corpo_lista = part.get_payload(decode=True).decode(errors="ignore")
+        if data_lista[0]:
+            eid = data_lista[0].split()[-1]
+            _, d = mail.fetch(eid, '(RFC822)')
+            msg = email.message_from_bytes(d[0][1])
+            
+            corpo_l = ""
+            for part in msg.walk():
+                if part.get_content_type() in ["text/plain", "text/html"]:
+                    corpo_l = part.get_payload(decode=True).decode(errors="ignore")
+                    if part.get_content_type() == "text/html": corpo_l = limpar_html(corpo_l)
                     break
-        else:
-            corpo_lista = msg_lista.get_payload(decode=True).decode(errors="ignore")
-
-        partes = re.split(r'BELEM:', corpo_lista, flags=re.IGNORECASE)
-        slz_bruto = [l.strip() for l in partes[0].replace('SLZ:', '').split('\n') if l.strip() and not e_assinatura(l)]
-        bel_bruto = []
-        if len(partes) > 1:
-            for l in partes[1].split('\n'):
-                line = l.strip()
-                if line and not e_assinatura(line): bel_bruto.append(line)
-                elif line and e_assinatura(line) and len(bel_bruto) > 0: break
+            
+            partes = re.split(r'BELEM:', corpo_l, flags=re.IGNORECASE)
+            slz_bruto = [l.strip() for l in partes[0].replace('SLZ:', '').split('\n') if len(l.strip()) > 3 and len(l.strip()) < 50]
+            if len(partes) > 1:
+                bel_bruto = [l.strip() for l in partes[1].split('\n') if len(l.strip()) > 3 and len(l.strip()) < 50]
 
         # 2. PROSPECTS (Hoje)
         mail.select(f'"{LABEL_PROSPECT}"', readonly=True)
@@ -113,78 +102,70 @@ def buscar_dados():
                     if envio_br.date() == hoje_br:
                         subj = "".join(str(c.decode(ch or 'utf-8') if isinstance(c, bytes) else c) for c, ch in decode_header(m.get("Subject", ""))).upper()
                         
-                        corpo = ""
-                        if m.is_multipart():
-                            for p in m.walk():
-                                if p.get_content_type() == "text/plain": 
-                                    corpo = p.get_payload(decode=True).decode(errors="ignore")
-                        else: 
-                            corpo = m.get_payload(decode=True).decode(errors="ignore")
-                        
+                        corpo_p = ""
+                        # PRIORIZA HTML para evitar tabelas virem em branco
+                        for part in m.walk():
+                            ctype = part.get_content_type()
+                            if ctype == "text/html":
+                                corpo_p = limpar_html(part.get_payload(decode=True).decode(errors="ignore"))
+                                break
+                            elif ctype == "text/plain":
+                                corpo_p = part.get_payload(decode=True).decode(errors="ignore")
+
                         prospects_list.append({
                             "subj": subj, 
                             "date": envio_br, 
-                            "datas": extrair_datas_prospect(corpo)
+                            "datas": extrair_datas_prospect(corpo_p)
                         })
                 except: continue
         
         mail.logout()
         return slz_bruto, bel_bruto, prospects_list
-
     except Exception as e:
         return None, None, str(e)
 
 # --- INTERFACE ---
-st.set_page_config(page_title="Monitor Operacional WS", layout="wide")
+st.set_page_config(page_title="Monitor Wilson Sons", layout="wide")
 st.title("🚢 Monitor Operacional - Wilson Sons")
 
-if 'slz_tab' not in st.session_state: st.session_state.slz_tab = []
-if 'bel_tab' not in st.session_state: st.session_state.bel_tab = []
-if 'last_up' not in st.session_state: st.session_state.last_up = "-"
+if 'dados' not in st.session_state:
+    st.session_state.dados = {"slz": [], "bel": [], "at": "-"}
 
-if st.button("🔄 ATUALIZAR DADOS", use_container_width=True, type="primary"):
-    with st.spinner("Lendo e-mails e extraindo datas..."):
+if st.button("🔄 ATUALIZAR AGORA", use_container_width=True, type="primary"):
+    with st.spinner("Processando e-mails (HTML Mode)..."):
         slz, bel, prospects = buscar_dados()
         
         if isinstance(prospects, str):
             st.error(f"Erro: {prospects}")
         elif slz is not None:
-            def montar(lista_navios, is_bel=False):
+            def montar(lista, is_bel=False):
                 res = []
-                for navio_bruto in lista_navios:
-                    n_limpo = limpar_nome(navio_bruto)
-                    p_limpo = extrair_porto(navio_bruto)
+                for n_bruto in lista:
+                    nome = limpar_nome(n_bruto)
+                    porto = extrair_porto(n_bruto)
                     
-                    vessel_emails = [e for e in prospects if n_limpo in e["subj"]]
-                    if is_bel and p_limpo:
-                        vessel_emails = [e for e in vessel_emails if p_limpo in e["subj"]]
+                    match = [e for e in prospects if nome in e["subj"]]
+                    if is_bel and porto: match = [e for e in match if porto in e["subj"]]
+                    match.sort(key=lambda x: x["date"], reverse=True)
                     
-                    vessel_emails.sort(key=lambda x: x["date"], reverse=True)
-                    
-                    # AM: até 13h | PM: após 13h
-                    am_check = any(e["date"].hour < 13 for e in vessel_emails)
-                    pm_check = any(e["date"].hour >= 13 for e in vessel_emails)
-                    
-                    info = vessel_emails[0]["datas"] if vessel_emails else {"ETA": "-", "ETB": "-", "ETD": "-"}
+                    info = match[0]["datas"] if match else {"ETA": "-", "ETB": "-", "ETD": "-"}
                     
                     res.append({
-                        "Navio": f"{n_limpo} ({p_limpo})" if p_limpo else n_limpo,
-                        "AM (até 13h)": "✅" if am_check else "❌",
-                        "PM (pós 13h)": "✅" if pm_check else "❌",
-                        "ETA": info["ETA"], 
-                        "ETB": info["ETB"], 
-                        "ETD": info["ETD"]
+                        "Navio": f"{nome} ({porto})" if porto else nome,
+                        "AM (Até 13h)": "✅" if any(e["date"].hour < 13 for e in match) else "❌",
+                        "PM (Pós 13h)": "✅" if any(e["date"].hour >= 13 for e in match) else "❌",
+                        "ETA": info["ETA"], "ETB": info["ETB"], "ETD": info["ETD"]
                     })
                 return res
 
-            st.session_state.slz_tab = montar(slz)
-            st.session_state.bel_tab = montar(bel, True)
-            st.session_state.last_up = datetime.now(BR_TZ).strftime("%H:%M:%S")
+            st.session_state.dados = {
+                "slz": montar(slz),
+                "bel": montar(bel, True),
+                "at": datetime.now(BR_TZ).strftime("%H:%M:%S")
+            }
 
-if st.session_state.slz_tab or st.session_state.bel_tab:
-    st.write(f"Última atualização: **{st.session_state.last_up}**")
+if st.session_state.dados["at"] != "-":
+    st.write(f"Última atualização: **{st.session_state.dados['at']}**")
     t1, t2 = st.tabs(["📍 São Luís", "📍 Belém"])
-    with t1: st.table(st.session_state.slz_tab)
-    with t2: st.table(st.session_state.bel_tab)
-else:
-    st.info("Aguardando sincronização inicial.")
+    with t1: st.table(st.session_state.dados["slz"])
+    with t2: st.table(st.session_state.dados["bel"])
