@@ -19,7 +19,6 @@ st_autorefresh(interval=300000, key="auto_refresh")
 # --- BANCO DE DADOS (SQLITE) ---
 
 def init_db():
-    """Cria a tabela no banco de dados se não existir"""
     conn = sqlite3.connect('monitor_navios.db')
     c = conn.cursor()
     c.execute('''CREATE TABLE IF NOT EXISTS navios 
@@ -28,27 +27,21 @@ def init_db():
     conn.close()
 
 def salvar_no_banco(nome, eta, etb, etd):
-    """Salva ou atualiza as datas de um navio no banco"""
-    if eta == "-" and etb == "-" and etd == "-": return # Não apaga dado bom com dado vazio
+    if eta == "-" and etb == "-" and etd == "-": return
     conn = sqlite3.connect('monitor_navios.db')
     c = conn.cursor()
-    # Pega o que já tem no banco para não sobrepor com "-"
     c.execute("SELECT eta, etb, etd FROM navios WHERE nome=?", (nome,))
     existente = c.fetchone()
-    
-    # Se já existe, só atualiza o que não for "-"
     if existente:
         eta = eta if eta != "-" else existente[0]
         etb = etb if etb != "-" else existente[1]
         etd = etd if etd != "-" else existente[2]
-
     c.execute('''INSERT OR REPLACE INTO navios (nome, eta, etb, etd, ultima_atualizacao)
                  VALUES (?, ?, ?, ?, ?)''', (nome, eta, etb, etd, datetime.now(BR_TZ).strftime("%d/%m %H:%M")))
     conn.commit()
     conn.close()
 
 def ler_do_banco(nome):
-    """Lê as últimas datas salvas de um navio"""
     conn = sqlite3.connect('monitor_navios.db')
     c = conn.cursor()
     c.execute("SELECT eta, etb, etd FROM navios WHERE nome=?", (nome,))
@@ -72,8 +65,8 @@ def formatar_data_br(texto_data, data_referencia):
         if dia_match and mes_match:
             dia, mes = int(dia_match.group(1)), meses_en[mes_match.group(1)]
             ano = data_referencia.year
-            data_dt = datetime(ano, mes, dia)
-            if (data_referencia.replace(tzinfo=None) - data_dt).days > 45: return None
+            dt_detectada = datetime(ano, mes, dia)
+            if (data_referencia.replace(tzinfo=None) - dt_detectada).days > 45: return None
             return f"{dia:02d}/{mes:02d}/{ano}"
     except: pass
     return None
@@ -100,8 +93,6 @@ def buscar_dados():
     try:
         mail = imaplib.IMAP4_SSL("imap.gmail.com", timeout=25)
         mail.login(EMAIL_USER, EMAIL_PASS)
-        
-        # 1. LISTA NAVIOS
         mail.select("INBOX", readonly=True)
         _, data_lista = mail.search(None, '(SUBJECT "LISTA NAVIOS")')
         slz_bruto, bel_bruto = [], []
@@ -120,11 +111,9 @@ def buscar_dados():
             if len(partes) > 1:
                 bel_bruto = [l.strip() for l in partes[1].split('\n') if 3 < len(l.strip()) < 60]
 
-        # 2. PROSPECTS (Volta a buscar apenas de HOJE para ser rápido)
         mail.select(f'"{LABEL_PROSPECT}"', readonly=True)
         hoje_str = datetime.now(BR_TZ).strftime("%d-%b-%Y")
         _, data_p = mail.search(None, f'(SINCE "{hoje_str}")')
-        
         prospects_list = []
         if data_p[0]:
             ids = data_p[0].split()[-60:] 
@@ -147,18 +136,42 @@ def buscar_dados():
         return slz_bruto, bel_bruto, prospects_list
     except Exception as e: return None, None, str(e)
 
-# --- UI ---
+# --- FUNÇÃO DE E-MAIL ---
+
+def enviar_email_relatorio(dados_slz, dados_bel):
+    try:
+        msg = MIMEMultipart()
+        msg['From'] = EMAIL_USER
+        msg['To'] = DESTINATARIO
+        msg['Subject'] = f"🚢 Monitor Operacional WS - {datetime.now(BR_TZ).strftime('%d/%m %H:%M')}"
+        def gerar_linhas(lista):
+            h = ""
+            for r in lista:
+                c_am = "#d4edda" if r["AM"] == "✅" else "#f8d7da"
+                c_pm = "#d4edda" if r["PM"] == "✅" else "#f8d7da"
+                h += f"<tr><td style='border:1px solid #ddd;padding:8px;'>{r['Navio']}</td><td style='border:1px solid #ddd;padding:8px;text-align:center;background-color:{c_am};'>{r['AM']}</td><td style='border:1px solid #ddd;padding:8px;text-align:center;background-color:{c_pm};'>{r['PM']}</td><td style='border:1px solid #ddd;padding:8px;text-align:center;'>{r['ETA/Arrival']}</td><td style='border:1px solid #ddd;padding:8px;text-align:center;'>{r['ETB']}</td><td style='border:1px solid #ddd;padding:8px;text-align:center;'>{r['ETD']}</td></tr>"
+            return h
+        corpo = f"<html><body><h2>Relatório Wilson Sons</h2><table style='border-collapse:collapse;width:100%;'><tr style='background-color:#004a99;color:white;'><th>Navio</th><th>AM</th><th>PM</th><th>ETA/Arrival</th><th>ETB</th><th>ETD</th></tr>{gerar_linhas(dados_slz)}</table><br><h3>Belém</h3><table style='border-collapse:collapse;width:100%;'>{gerar_linhas(dados_bel)}</table></body></html>"
+        msg.attach(MIMEText(corpo, 'html'))
+        s = smtplib.SMTP('smtp.gmail.com', 587); s.starttls(); s.login(EMAIL_USER, EMAIL_PASS); s.send_message(msg); s.quit()
+        return True
+    except Exception as e: st.error(f"Erro e-mail: {e}"); return False
+
+# --- UI STREAMLIT ---
 st.set_page_config(page_title="Monitor WS", layout="wide")
-init_db() # Garante que o banco de dados existe
+init_db()
 
 st.title("🚢 Monitor Operacional Wilson Sons")
 
-if 'dados' not in st.session_state: st.session_state.dados = {"slz": [], "bel": [], "at": "-"}
+# Inicializa Session State
+if 'dados' not in st.session_state:
+    st.session_state.dados = {"slz": [], "bel": [], "at": "-"}
 
 col1, col2 = st.columns(2)
+
 with col1:
     if st.button("🔄 ATUALIZAR AGORA", use_container_width=True, type="primary"):
-        with st.spinner("Sincronizando Gmail e Banco de Dados..."):
+        with st.spinner("Sincronizando Gmail..."):
             slz_res, bel_res, prospects = buscar_dados()
             if slz_res is not None:
                 def montar(lista, p_filtro=None):
@@ -170,20 +183,31 @@ with col1:
                         if p_filtro and porto and len(match) > 1:
                             m_p = [e for e in match if porto in e["subj"]]
                             if m_p: match = m_p
-                        
                         match.sort(key=lambda x: x["date"], reverse=True)
-                        
-                        # Se achou e-mail hoje, salva no banco. Se não achou, lê do banco.
                         if match:
-                            info_hoje = match[0]["datas"]
-                            salvar_no_banco(nome, info_hoje["ETA"], info_hoje["ETB"], info_hoje["ETD"])
-                            eta, etb, etd = info_hoje["ETA"], info_hoje["ETB"], info_hoje["ETD"]
-                        else:
-                            eta, etb, etd = ler_do_banco(nome)
-
+                            info = match[0]["datas"]
+                            salvar_no_banco(nome, info["ETA"], info["ETB"], info["ETD"])
+                        eta, etb, etd = ler_do_banco(nome)
                         res.append({"Navio": f"{nome} ({porto})" if porto else nome,
                                     "AM": "✅" if any(e["date"].hour < 13 for e in match) else "❌",
                                     "PM": "✅" if any(e["date"].hour >= 13 for e in match) else "❌",
                                     "ETA/Arrival": eta, "ETB": etb, "ETD": etd})
                     return res
                 st.session_state.dados = {"slz": montar(slz_res), "bel": montar(bel_res, p_filtro="BELEM"), "at": datetime.now(BR_TZ).strftime("%H:%M:%S")}
+
+with col2:
+    if st.button("📧 ENVIAR POR E-MAIL", use_container_width=True):
+        if st.session_state.dados["slz"]:
+            if enviar_email_relatorio(st.session_state.dados["slz"], st.session_state.dados["bel"]):
+                st.success("E-mail enviado com sucesso!")
+        else:
+            st.warning("Clique em Atualizar primeiro.")
+
+# EXIBIÇÃO FORA DOS BOTÕES (Sempre Visível)
+if st.session_state.dados["at"] != "-":
+    st.write(f"Última atualização: **{st.session_state.dados['at']}**")
+    t1, t2 = st.tabs(["📍 São Luís", "📍 Belém"])
+    with t1: st.table(st.session_state.dados["slz"])
+    with t2: st.table(st.session_state.dados["bel"])
+else:
+    st.info("Sistema pronto. Clique em 'ATUALIZAR AGORA' para carregar os navios.")
