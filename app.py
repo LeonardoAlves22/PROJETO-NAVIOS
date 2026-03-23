@@ -22,14 +22,12 @@ st_autorefresh(interval=300000, key="auto_refresh")
 def init_db():
     conn = sqlite3.connect('monitor_navios.db')
     c = conn.cursor()
-    # Cria a tabela base
     c.execute('''CREATE TABLE IF NOT EXISTS navios 
-                 (nome TEXT PRIMARY KEY, eta TEXT, etb TEXT, etd TEXT, ultima_atualizacao TEXT)''')
-    # Tenta adicionar a coluna clp caso ela não exista (evita o OperationalError)
+                 (nome TEXT PRIMARY KEY, eta TEXT, etb TEXT, etd TEXT, clp TEXT, ultima_atualizacao TEXT)''')
     try:
         c.execute("ALTER TABLE navios ADD COLUMN clp TEXT")
     except:
-        pass # Coluna já existe
+        pass 
     conn.commit()
     conn.close()
 
@@ -47,8 +45,8 @@ def salvar_no_banco(nome, eta, etb, etd, clp):
         
         c.execute('''INSERT OR REPLACE INTO navios (nome, eta, etb, etd, clp, ultima_atualizacao)
                      VALUES (?, ?, ?, ?, ?, ?)''', (nome, eta, etb, etd, clp, datetime.now(BR_TZ).strftime("%d/%m %H:%M")))
-    except Exception as e:
-        print(f"Erro ao salvar: {e}")
+    except:
+        pass
     conn.commit()
     conn.close()
 
@@ -157,6 +155,31 @@ def buscar_dados():
         return slz, bel, prospects, clps_list
     except Exception as e: return None, None, str(e), []
 
+# --- FUNÇÃO DE E-MAIL ---
+
+def enviar_email_relatorio(dados_slz, dados_bel):
+    try:
+        msg = MIMEMultipart()
+        msg['From'] = EMAIL_USER
+        msg['To'] = DESTINATARIO
+        msg['Subject'] = f"🚢 Monitor Operacional WS - {datetime.now(BR_TZ).strftime('%d/%m %H:%M')}"
+
+        def gerar_linhas(lista):
+            h = ""
+            for r in lista:
+                c_am = "#d4edda" if r["AM"] == "✅" else "#f8d7da"
+                c_pm = "#d4edda" if r["PM"] == "✅" else "#f8d7da"
+                # Cores no e-mail para CLP
+                c_clp = "#fff3cd" if "CRÍTICO" in r["CLP"] else ("#d4edda" if "EMITIDA" in r["CLP"] else "#f8d7da")
+                h += f"<tr><td style='border:1px solid #ddd;padding:8px;'>{r['Navio']}</td><td style='background:{c_am};text-align:center;'>{r['AM']}</td><td style='background:{c_pm};text-align:center;'>{r['PM']}</td><td style='text-align:center;'>{r['ETA']}</td><td style='text-align:center;'>{r['ETB']}</td><td style='text-align:center;'>{r['ETD']}</td><td style='background:{c_clp};text-align:center;'>{r['CLP']}</td></tr>"
+            return h
+
+        corpo = f"<html><body><h2>Relatório Wilson Sons</h2><p>Sincronizado: {datetime.now(BR_TZ).strftime('%d/%m %H:%M')}</p><table style='border-collapse:collapse;width:100%;'><tr style='background:#004a99;color:white;'><th>Navio</th><th>AM</th><th>PM</th><th>ETA</th><th>ETB</th><th>ETD</th><th>CLP</th></tr>{gerar_linhas(dados_slz)}</table><br><h3>Belém</h3><table style='border-collapse:collapse;width:100%;'>{gerar_linhas(dados_bel)}</table></body></html>"
+        msg.attach(MIMEText(corpo, 'html'))
+        s = smtplib.SMTP('smtp.gmail.com', 587); s.starttls(); s.login(EMAIL_USER, EMAIL_PASS); s.send_message(msg); s.quit()
+        return True
+    except Exception as e: st.error(f"Erro e-mail: {e}"); return False
+
 # --- UI ---
 st.set_page_config(page_title="Monitor WS", layout="wide")
 init_db()
@@ -193,6 +216,15 @@ with col1:
                         res.append({"Navio": n, "AM": "✅" if any(e["date"].hour < 13 for e in match) else "❌", "PM": "✅" if any(e["date"].hour >= 13 for e in match) else "❌", "ETA": eta, "ETB": etb, "ETD": etd, "CLP": clp_st})
                     return res
                 st.session_state.dados = {"slz": montar(slz_res), "bel": montar(bel_res), "at": agora.strftime("%H:%M:%S")}
+
+with col2:
+    if st.button("📧 ENVIAR POR E-MAIL", use_container_width=True):
+        if st.session_state.dados["slz"]:
+            with st.spinner("Enviando e-mail..."):
+                if enviar_email_relatorio(st.session_state.dados["slz"], st.session_state.dados["bel"]):
+                    st.success("E-mail enviado!")
+        else:
+            st.warning("Atualize os dados primeiro.")
 
 if st.session_state.dados["at"] != "-":
     st.write(f"Última atualização: **{st.session_state.dados['at']}**")
