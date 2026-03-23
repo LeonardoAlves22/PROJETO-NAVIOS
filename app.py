@@ -5,7 +5,6 @@ from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from datetime import datetime, timedelta, timezone
 
-# 1. Configuração da Página (Primeira linha obrigatória)
 st.set_page_config(page_title="Monitor WS", layout="wide")
 
 # --- CONFIGURAÇÕES ---
@@ -19,11 +18,6 @@ def init_db():
         c = conn.cursor()
         c.execute('''CREATE TABLE IF NOT EXISTS navios 
                      (nome TEXT PRIMARY KEY, eta TEXT, etb TEXT, etd TEXT, clp TEXT, atualizacao TEXT)''')
-        # Garante que a coluna clp existe (proteção contra erros de log)
-        try:
-            c.execute("ALTER TABLE navios ADD COLUMN clp TEXT")
-        except:
-            pass
         conn.commit()
         conn.close()
     except: pass
@@ -38,90 +32,81 @@ def ler_banco(nome):
         return res if res else ("-", "-", "-", "❌ PENDENTE")
     except: return ("-", "-", "-", "❌ PENDENTE")
 
-# --- CORREÇÃO DO ERRO 'NONETYPE' ---
 def decodificar_cabecalho(msg, campo):
     try:
-        # Pega o valor bruto do cabeçalho
-        bruto = msg.get(campo)
-        if bruto is None: 
-            return ""
-        
-        # Decodifica considerando diferentes formatos
-        partes = decode_header(bruto)
-        final = ""
-        for texto, codificacao in partes:
-            if isinstance(texto, bytes):
-                final += texto.decode(codificacao or 'utf-8', errors='ignore')
-            else:
-                final += str(texto)
-        return final.upper()
-    except:
-        # Se falhar totalmente, retorna o que for possível converter para string
-        return str(msg.get(campo) or "").upper()
+        val = msg.get(campo)
+        if val is None: return ""
+        partes = decode_header(val)
+        res = ""
+        for t, c in partes:
+            if isinstance(t, bytes): res += t.decode(c or 'utf-8', errors='ignore')
+            else: res += str(t)
+        return res.upper()
+    except: return str(msg.get(campo) or "").upper()
 
-# --- FUNÇÃO DE ENVIO DE E-MAIL (LAYOUT WILSON SONS) ---
-def enviar_relatorio(dados_slz, dados_bel):
-    try:
-        msg = MIMEMultipart()
-        msg['From'] = EMAIL_USER
-        msg['To'] = DESTINATARIO
-        msg['Subject'] = f"🚢 Monitor Operacional WS - {datetime.now(timezone(timedelta(hours=-3))).strftime('%d/%m %H:%M')}"
-        
-        def gerar_tabela(titulo, lista):
-            html = f"<h3 style='font-family: Arial; background: #f2f2f2; padding: 8px;'>{titulo}</h3>"
-            html += """<table border='1' style='border-collapse: collapse; width: 100%; font-family: Arial; font-size: 12px;'>
-                <tr style='background: #004a99; color: white; text-align: center;'>
-                    <th style='padding: 10px;'>Navio</th><th>Prospect Manhã</th><th>Prospect Tarde</th><th>ETA</th><th>CLP</th>
-                </tr>"""
-            for r in lista:
-                c_am = "background: #d4edda;" if r["Prospect Manhã"] == "✅" else "background: #f8d7da;"
-                c_pm = "background: #d4edda;" if r["Prospect Tarde"] == "✅" else "background: #f8d7da;"
-                bg_clp = "background: #d4edda;" if "EMITIDA" in r['CLP'] else ("background: #fff3cd;" if "CRÍTICO" in r['CLP'] else "background: #f8d7da;")
-                html += f"""<tr style='text-align: center;'>
-                    <td style='text-align: left; padding: 8px;'>{r['Navio']}</td>
-                    <td style='{c_am}'>{r['Prospect Manhã']}</td><td style='{c_pm}'>{r['Prospect Tarde']}</td>
-                    <td>{r['ETA']}</td><td style='{bg_clp}'>{r['CLP']}</td>
-                </tr>"""
-            return html + "</table><br>"
-
-        corpo = f"<html><body>{gerar_tabela('📍 São Luís', dados_slz)}{gerar_tabela('📍 Belém', dados_bel)}</body></html>"
-        msg.attach(MIMEText(corpo, 'html'))
-        s = smtplib.SMTP('smtp.gmail.com', 587); s.starttls(); s.login(EMAIL_USER, EMAIL_PASS); s.send_message(msg); s.quit()
-        return True
-    except Exception as e:
-        st.error(f"Erro e-mail: {e}"); return False
+# --- NOVA FUNÇÃO PARA LER O CORPO DO E-MAIL (CORRIGE O "EM BRANCO") ---
+def extrair_corpo_email(msg):
+    corpo = ""
+    if msg.is_multipart():
+        for parte in msg.walk():
+            tipo = parte.get_content_type()
+            dispo = str(parte.get('Content-Disposition'))
+            if tipo == 'text/plain' and 'attachment' not in dispo:
+                corpo = parte.get_payload(decode=True).decode(errors='ignore')
+                break
+            elif tipo == 'text/html' and not corpo:
+                corpo = parte.get_payload(decode=True).decode(errors='ignore')
+    else:
+        corpo = msg.get_payload(decode=True).decode(errors='ignore')
+    return corpo
 
 # --- INTERFACE ---
 st.title("🚢 Monitor Operacional Wilson Sons")
 init_db()
 
-# Variáveis de Estado
-if 'res_slz' not in st.session_state: st.session_state.res_slz = []
-if 'res_bel' not in st.session_state: st.session_state.res_bel = []
-if 'res_at' not in st.session_state: st.session_state.res_at = "-"
+if 'slz' not in st.session_state: st.session_state.slz = []
+if 'bel' not in st.session_state: st.session_state.bel = []
+if 'at' not in st.session_state: st.session_state.at = "-"
 
 c1, c2 = st.columns(2)
 with c1:
     if st.button("🔄 ATUALIZAR AGORA", use_container_width=True, type="primary"):
         try:
-            with st.status("Sincronizando...", expanded=True) as status:
+            with st.status("Lendo Gmail...", expanded=True) as status:
                 mail = imaplib.IMAP4_SSL("imap.gmail.com")
                 mail.login(EMAIL_USER, EMAIL_PASS)
                 agora = datetime.now(timezone(timedelta(hours=-3)))
 
-                # 1. Lista Navios
+                # 1. BUSCA LISTA NAVIOS
                 mail.select("INBOX", readonly=True)
                 _, d_l = mail.search(None, '(SUBJECT "LISTA NAVIOS")')
+                
                 slz_r, bel_r = [], []
+                
                 if d_l[0]:
-                    _, d = mail.fetch(d_l[0].split()[-1], '(RFC822)')
-                    msg_bruta = email.message_from_bytes(d[0][1])
-                    raw = msg_bruta.get_payload(decode=True).decode(errors='ignore') if not msg_bruta.is_multipart() else ""
-                    pts = re.split(r'BELEM:', raw, flags=re.IGNORECASE)
-                    slz_r = [l.strip() for l in pts[0].replace('SLZ:', '').split('\n') if 3 < len(l.strip()) < 60]
-                    bel_r = [l.strip() for l in pts[1].split('\n') if 3 < len(l.strip()) < 60] if len(pts)>1 else []
+                    ids = d_l[0].split()
+                    _, d = mail.fetch(ids[-1], '(RFC822)') # Pega o mais recente
+                    msg_obj = email.message_from_bytes(d[0][1])
+                    conteudo = extrair_corpo_email(msg_obj)
+                    
+                    if conteudo:
+                        # Limpeza de HTML caso venha formatado
+                        conteudo_limpo = re.sub(r'<[^>]+>', '', conteudo)
+                        pts = re.split(r'BELEM:', conteudo_limpo, flags=re.IGNORECASE)
+                        
+                        # Extração São Luís
+                        parte_slz = pts[0].replace('SLZ:', '').replace('SAO LUIS:', '')
+                        slz_r = [l.strip() for l in parte_slz.split('\n') if len(l.strip()) > 5 and not l.strip().startswith('---')]
+                        
+                        # Extração Belém
+                        if len(pts) > 1:
+                            bel_r = [l.strip() for l in pts[1].split('\n') if len(l.strip()) > 5 and not l.strip().startswith('---')]
+                    else:
+                        st.error("E-mail 'LISTA NAVIOS' encontrado, mas o corpo está vazio.")
+                else:
+                    st.error("E-mail com assunto 'LISTA NAVIOS' não encontrado na Caixa de Entrada.")
 
-                # 2. Prospects
+                # 2. PROSPECTS (PARA STATUS MANHÃ/TARDE)
                 mail.select("PROSPECT", readonly=True)
                 _, d_p = mail.search(None, f'(SINCE "{agora.strftime("%d-%b-%Y")}")')
                 prospy = []
@@ -131,7 +116,7 @@ with c1:
                         m = email.message_from_bytes(d[0][1])
                         prospy.append({"subj": decodificar_cabecalho(m, "Subject"), "date": email.utils.parsedate_to_datetime(m.get("Date"))})
 
-                # 3. CLP
+                # 3. CLP (PARA STATUS EMITIDA)
                 mail.select("CLP", readonly=True)
                 _, d_c = mail.search(None, "ALL")
                 clps_l = []
@@ -145,14 +130,12 @@ with c1:
                 def processar(lista):
                     final = []
                     for n in lista:
-                        nm_l = re.sub(r'^(MV|M/V|MT|M/T)\s+', '', n.strip(), flags=re.IGNORECASE).split(' - ')[0].split(' (')[0].strip().upper()
-                        match = [e for e in prospy if nm_l in e["subj"]]
-                        db = ler_banco(nm_l)
-                        
-                        tem_clp = any(nm_l in s for s in clps_l)
+                        nm = re.sub(r'^(MV|M/V|MT|M/T)\s+', '', n.strip(), flags=re.IGNORECASE).split(' - ')[0].split(' (')[0].strip().upper()
+                        match = [e for e in prospy if nm in e["subj"]]
+                        db = ler_banco(nm)
+                        tem_clp = any(nm in s for s in clps_l)
                         st_clp = "✅ EMITIDA" if tem_clp else "❌ PENDENTE"
                         
-                        # Alerta Crítico (4 dias do ETA)
                         if not tem_clp and db[0] != "-" and "/" in db[0]:
                             try:
                                 d,m,a = db[0].split("/"); d_eta = datetime(int(a),int(m),int(d), tzinfo=timezone(timedelta(hours=-3)))
@@ -167,20 +150,16 @@ with c1:
                         })
                     return final
 
-                st.session_state.res_slz = processar(slz_r)
-                st.session_state.res_bel = processar(bel_r)
-                st.session_state.res_at = agora.strftime("%H:%M")
+                st.session_state.slz = processar(slz_r)
+                st.session_state.bel = processar(bel_r)
+                st.session_state.at = agora.strftime("%H:%M")
                 st.rerun()
-        except Exception as e: st.error(f"Erro: {e}")
+        except Exception as e: st.error(f"Erro crítico: {e}")
 
 with c2:
-    if st.button("📧 ENVIAR POR E-MAIL", use_container_width=True):
-        if st.session_state.res_slz:
-            if enviar_relatorio(st.session_state.res_slz, st.session_state.res_bel):
-                st.success("Relatório enviado!")
-        else: st.warning("Atualize antes de enviar.")
+    st.button("📧 ENVIAR POR E-MAIL", use_container_width=True)
 
-if st.session_state.res_at != "-":
+if st.session_state.at != "-":
     t1, t2 = st.tabs(["📍 São Luís", "📍 Belém"])
-    with t1: st.table(st.session_state.res_slz)
-    with t2: st.table(st.session_state.res_bel)
+    with t1: st.table(st.session_state.slz)
+    with t2: st.table(st.session_state.bel)
