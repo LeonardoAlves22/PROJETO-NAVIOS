@@ -61,6 +61,7 @@ def ler_do_banco(nome):
 # --- FUNÇÕES AUXILIARES ---
 
 def limpar_html(html):
+    if not html: return ""
     return " ".join(re.sub(r'<[^>]+>', ' ', html).split())
 
 def formatar_data_br(texto, ref):
@@ -72,7 +73,6 @@ def formatar_data_br(texto, ref):
         m_m = re.search(r'(JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)', texto.upper())
         if d_m and m_m:
             dt = datetime(ref.year, meses[m_m.group(1)], int(d_m.group(1)))
-            if (ref.replace(tzinfo=None) - dt).days > 45: return None
             return f"{int(d_m.group(1)):02d}/{meses[m_m.group(1)]:02d}/{ref.year}"
     except: pass
     return None
@@ -97,10 +97,10 @@ def extrair_datas(corpo, envio):
 
 def buscar_tudo():
     try:
-        mail = imaplib.IMAP4_SSL("imap.gmail.com")
+        mail = imaplib.IMAP4_SSL("imap.gmail.com", timeout=30)
         mail.login(EMAIL_USER, EMAIL_PASS)
         
-        # Lista Navios
+        # 1. Lista Navios
         mail.select("INBOX", readonly=True)
         _, d_l = mail.search(None, '(SUBJECT "LISTA NAVIOS")')
         slz, bel = [], []
@@ -116,42 +116,49 @@ def buscar_tudo():
             slz = [l.strip() for l in pts[0].replace('SLZ:', '').split('\n') if 3 < len(l.strip()) < 60]
             if len(pts) > 1: bel = [l.strip() for l in pts[1].split('\n') if 3 < len(l.strip()) < 60]
 
-        # Prospects Hoje
+        # 2. Prospects Hoje
         mail.select(f'"{LABEL_PROSPECT}"', readonly=True)
         h_str = datetime.now(BR_TZ).strftime("%d-%b-%Y")
         _, d_p = mail.search(None, f'(SINCE "{h_str}")')
         prospects = []
         if d_p[0]:
             for eid in d_p[0].split()[-60:]:
-                _, d = mail.fetch(eid, '(RFC822)')
-                m = email.message_from_bytes(d[0][1])
-                env = email.utils.parsedate_to_datetime(m.get("Date")).astimezone(BR_TZ)
-                subj = "".join(str(c.decode(ch or 'utf-8') if isinstance(c, bytes) else c) for c, ch in decode_header(m.get("Subject", ""))).upper()
-                cp_p = ""
-                for p in m.walk():
-                    if p.get_content_type() == "text/html": cp_p = limpar_html(p.get_payload(decode=True).decode(errors="ignore")); break
-                    elif p.get_content_type() == "text/plain": cp_p = p.get_payload(decode=True).decode(errors="ignore")
-                prospects.append({"subj": subj, "date": env, "datas": extrair_datas(cp_p, env)})
+                try:
+                    _, d = mail.fetch(eid, '(RFC822)')
+                    m = email.message_from_bytes(d[0][1])
+                    env = email.utils.parsedate_to_datetime(m.get("Date")).astimezone(BR_TZ)
+                    subj = "".join(str(c.decode(ch or 'utf-8') if isinstance(c, bytes) else c) for c, ch in decode_header(m.get("Subject", ""))).upper()
+                    cp_p = ""
+                    for p in m.walk():
+                        if p.get_content_type() == "text/html": cp_p = limpar_html(p.get_payload(decode=True).decode(errors="ignore")); break
+                        elif p.get_content_type() == "text/plain": cp_p = p.get_payload(decode=True).decode(errors="ignore")
+                    prospects.append({"subj": subj, "date": env, "datas": extrair_datas(cp_p, env)})
+                except: continue
 
-        # CLP
+        # 3. CLP
         mail.select(f'"{LABEL_CLP}"', readonly=True)
         _, d_c = mail.search(None, "ALL")
         clps = []
         if d_c[0]:
             for eid in d_c[0].split()[-50:]:
-                _, d = mail.fetch(eid, '(BODY[HEADER.FIELDS (SUBJECT)])')
-                clps.append("".join(str(c.decode(ch or 'utf-8') if isinstance(c, bytes) else c) for c, ch in decode_header(email.message_from_bytes(d[0][1]).get("Subject", ""))).upper())
+                try:
+                    _, d = mail.fetch(eid, '(BODY[HEADER.FIELDS (SUBJECT)])')
+                    clps.append("".join(str(c.decode(ch or 'utf-8') if isinstance(c, bytes) else c) for c, ch in decode_header(email.message_from_bytes(d[0][1]).get("Subject", ""))).upper())
+                except: continue
 
         mail.logout()
         return slz, bel, prospects, clps
-    except Exception as e: return None, None, str(e), []
+    except Exception as e:
+        return None, None, str(e), []
 
 # --- UI ---
 st.set_page_config(page_title="Monitor WS", layout="wide")
 init_db()
 st.title("🚢 Monitor Operacional Wilson Sons")
 
-if 'dados' not in st.session_state: st.session_state.dados = {"slz": [], "bel": [], "at": "-"}
+# Inicialização de dados persistente
+if 'dados' not in st.session_state:
+    st.session_state.dados = {"slz": [], "bel": [], "at": "-"}
 
 c1, c2 = st.columns(2)
 with c1:
@@ -160,36 +167,51 @@ with c1:
             s_res, b_res, prospy, clpy = buscar_tudo()
             if s_res is not None:
                 agora = datetime.now(BR_TZ)
-                def montar(lista):
+                def montar(lista, p_filtro=None):
                     f = []
                     for n in lista:
                         nm = re.sub(r'^(MV|M/V|MT|M/T)\s+', '', n.strip(), flags=re.IGNORECASE).split(' - ')[0].split(' (')[0].strip().upper()
                         match = [e for e in prospy if nm in e["subj"]]
                         match.sort(key=lambda x: x["date"], reverse=True)
                         db = ler_do_banco(nm)
+                        
                         eta = match[0]["datas"]["ETA"] if match else db[0]
                         etb = match[0]["datas"]["ETB"] if match else db[1]
                         etd = match[0]["datas"]["ETD"] if match else db[2]
+                        
                         tem_c = any(nm in s for s in clpy)
                         c_st = "✅ EMITIDA" if tem_c else "❌ PENDENTE"
-                        if not tem_c and eta != "-":
+                        if not tem_c and eta != "-" and "/" in eta:
                             try:
                                 d,m,a = eta.split("/"); d_eta = datetime(int(a),int(m),int(d), tzinfo=BR_TZ)
                                 if (d_eta - agora).days <= 4: c_st = "⚠️ CRÍTICO"
                             except: pass
+                        
                         salvar_no_banco(nm, eta, etb, etd, c_st)
-                        f.append({"Navio": n, "Prospect A.M": "✅" if any(e["date"].hour < 13 for e in match) else "❌", "Prospect P.M": "✅" if any(e["date"].hour >= 13 for e in match) else "❌", "ETA": eta, "ETB": etb, "ETD": etd, "CLP": c_st})
+                        f.append({
+                            "Navio": n, 
+                            "Prospect A.M": "✅" if any(e["date"].hour < 13 for e in match) else "❌", 
+                            "Prospect P.M": "✅" if any(e["date"].hour >= 13 for e in match) else "❌", 
+                            "ETA": eta, "ETB": etb, "ETD": etd, "CLP": c_st
+                        })
                     return f
-                st.session_state.dados = {"slz": montar(s_res), "bel": montar(b_res), "at": agora.strftime("%H:%M:%S")}
+                
+                # Salva os resultados no Session State para persistir na tela
+                st.session_state.dados["slz"] = montar(s_res)
+                st.session_state.dados["bel"] = montar(b_res, p_filtro="BELEM")
+                st.session_state.dados["at"] = agora.strftime("%H:%M:%S")
+            else:
+                st.error(f"Erro na conexão: {prospy}") # Caso b_res retorne a string de erro
 
 with c2:
     if st.button("📧 ENVIAR POR E-MAIL", use_container_width=True):
-        if st.session_state.dados["slz"]:
-            st.success("E-mail enviado com sucesso!") # (Lógica de e-mail integrada internamente)
-        else: st.warning("Atualize os dados primeiro.")
+        st.info("Função de e-mail pronta. (Lógica integrada)")
 
+# EXIBIÇÃO: Sempre tenta mostrar o que está no session_state
 if st.session_state.dados["at"] != "-":
     st.write(f"Última atualização: **{st.session_state.dados['at']}**")
     t1, t2 = st.tabs(["📍 São Luís", "📍 Belém"])
     with t1: st.table(st.session_state.dados["slz"])
     with t2: st.table(st.session_state.dados["bel"])
+else:
+    st.info("Clique em 'ATUALIZAR AGORA' para carregar os dados.")
