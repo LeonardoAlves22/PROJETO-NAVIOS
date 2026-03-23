@@ -6,7 +6,6 @@ from email.mime.multipart import MIMEMultipart
 from datetime import datetime, timedelta
 from streamlit_autorefresh import st_autorefresh
 import pytz
-import os
 
 # --- CONFIGURAÇÕES ---
 EMAIL_USER = "leonardo.alves@wilsonsons.com.br"
@@ -18,38 +17,34 @@ BR_TZ = pytz.timezone('America/Sao_Paulo')
 
 st_autorefresh(interval=300000, key="auto_refresh")
 
-# --- BANCO DE DADOS (COM AUTO-REPAIR) ---
+# --- BANCO DE DADOS (COM REPARO AUTOMÁTICO) ---
 def init_db():
-    conn = sqlite3.connect('monitor_navios.db')
-    c = conn.cursor()
     try:
-        # Tenta ler a tabela para ver se está ok
-        c.execute("SELECT clp FROM navios LIMIT 1")
-    except:
-        # Se der erro (coluna faltando), apaga e recria do zero
-        st.warning("Atualizando estrutura do banco de dados...")
-        c.execute("DROP TABLE IF EXISTS navios")
-        c.execute('''CREATE TABLE navios 
+        conn = sqlite3.connect('monitor_navios.db')
+        c = conn.cursor()
+        # Verifica se a coluna CLP existe, se não, reseta a tabela para evitar tela branca
+        try:
+            c.execute("SELECT clp FROM navios LIMIT 1")
+        except:
+            c.execute("DROP TABLE IF EXISTS navios")
+            
+        c.execute('''CREATE TABLE IF NOT EXISTS navios 
                      (nome TEXT PRIMARY KEY, eta TEXT, etb TEXT, etd TEXT, clp TEXT, ultima_atualizacao TEXT)''')
-    conn.commit()
-    conn.close()
+        conn.commit()
+        conn.close()
+    except:
+        pass
 
 def salvar_no_banco(nome, eta, etb, etd, clp):
     try:
         conn = sqlite3.connect('monitor_navios.db')
         c = conn.cursor()
-        c.execute("SELECT eta, etb, etd, clp FROM navios WHERE nome=?", (nome,))
-        ex = c.fetchone()
-        if ex:
-            eta = eta if eta != "-" else ex[0]
-            etb = etb if etb != "-" else ex[1]
-            etd = etd if etd != "-" else ex[2]
-            clp = clp if clp != "-" else ex[3]
         c.execute('''INSERT OR REPLACE INTO navios (nome, eta, etb, etd, clp, ultima_atualizacao)
                      VALUES (?, ?, ?, ?, ?, ?)''', (nome, eta, etb, etd, clp, datetime.now(BR_TZ).strftime("%d/%m %H:%M")))
         conn.commit()
         conn.close()
-    except: pass
+    except:
+        pass
 
 def ler_do_banco(nome):
     try:
@@ -59,9 +54,10 @@ def ler_do_banco(nome):
         res = c.fetchone()
         conn.close()
         return res if res else ("-", "-", "-", "❌ PENDENTE")
-    except: return ("-", "-", "-", "❌ PENDENTE")
+    except:
+        return ("-", "-", "-", "❌ PENDENTE")
 
-# --- AUXILIARES ---
+# --- FUNÇÕES AUXILIARES ---
 def limpar_html(html):
     if not html: return ""
     return " ".join(re.sub(r'<[^>]+>', ' ', html).split())
@@ -83,22 +79,24 @@ def extrair_datas(corpo, envio):
     if not corpo: return res
     txt = corpo.upper().split("LINEUP DETAILS")[0]
     for k in ["ETB", "ETD", "ETS"]:
-        m = re.search(rf"{k}\s+.*?([A-Z]{{3,}}\s+\d{{1,2}}(?:ST|ND|RD|TH)?)", txt)
+        m = re.search(rf"{k}\s+.*?([A-Z]{{3,}}\s+\d{{1,2}})", txt)
         if m:
             dt = formatar_data_br(m.group(1).strip(), envio)
             if dt: res["ETD" if k == "ETS" else k] = dt
     for g in ["ARRIVAL AT ROADS", "NOTICE OF READINESS", "ETA"]:
-        m = re.search(rf"{g}\s+.*?([A-Z]{{3,}}\s+\d{{1,2}}(?:ST|ND|RD|TH)?)", txt)
+        m = re.search(rf"{g}\s+.*?([A-Z]{{3,}}\s+\d{{1,2}})", txt)
         if m:
             dt = formatar_data_br(m.group(1).strip(), envio)
             if dt: res["ETA"] = dt; break
     return res
 
-# --- GMAIL ---
+# --- BUSCA GMAIL ---
 def buscar_tudo():
     try:
         mail = imaplib.IMAP4_SSL("imap.gmail.com", timeout=30)
         mail.login(EMAIL_USER, EMAIL_PASS)
+        
+        # 1. LISTA NAVIOS
         mail.select("INBOX", readonly=True)
         _, d_l = mail.search(None, '(SUBJECT "LISTA NAVIOS")')
         slz, bel = [], []
@@ -113,7 +111,8 @@ def buscar_tudo():
             pts = re.split(r'BELEM:', cp, flags=re.IGNORECASE)
             slz = [l.strip() for l in pts[0].replace('SLZ:', '').split('\n') if 3 < len(l.strip()) < 60]
             if len(pts) > 1: bel = [l.strip() for l in pts[1].split('\n') if 3 < len(l.strip()) < 60]
-        
+
+        # 2. PROSPECTS
         mail.select(f'"{LABEL_PROSPECT}"', readonly=True)
         h_str = datetime.now(BR_TZ).strftime("%d-%b-%Y")
         _, d_p = mail.search(None, f'(SINCE "{h_str}")')
@@ -132,6 +131,7 @@ def buscar_tudo():
                     prospects.append({"subj": subj, "date": env, "datas": extrair_datas(cp_p, env)})
                 except: continue
 
+        # 3. CLP
         mail.select(f'"{LABEL_CLP}"', readonly=True)
         _, d_c = mail.search(None, "ALL")
         clps = []
@@ -145,7 +145,7 @@ def buscar_tudo():
         return slz, bel, prospects, clps
     except Exception as e: return None, None, str(e), []
 
-# --- E-MAIL ---
+# --- FUNÇÃO DE E-MAIL ---
 def enviar_email_relatorio(dados_slz, dados_bel):
     try:
         msg = MIMEMultipart()
