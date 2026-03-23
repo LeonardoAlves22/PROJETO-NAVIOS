@@ -184,7 +184,7 @@ with c1:
                         elif secao == "BEL" and len(linha) > 3: bel_raw.append(linha)
 
                 mail.select("PROSPECT", readonly=True)
-                _, d_p = mail.search(None, f'(SINCE "{(agora - timedelta(days=1)).strftime("%d-%b-%Y")}")')
+                _, d_p = mail.search(None, f'(SINCE "{(agora - timedelta(days=0)).strftime("%d-%b-%Y")}")')
                 prospy = []
                 if d_p[0]:
                     for eid in d_p[0].split()[-150:]:
