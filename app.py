@@ -22,7 +22,7 @@ st_autorefresh(interval=300000, key="auto_refresh")
 def init_db():
     conn = sqlite3.connect('monitor_navios.db')
     c = conn.cursor()
-    # Adicionada coluna clp na tabela
+    # Cria com 5 colunas de dados + timestamp
     c.execute('''CREATE TABLE IF NOT EXISTS navios 
                  (nome TEXT PRIMARY KEY, eta TEXT, etb TEXT, etd TEXT, clp TEXT, ultima_atualizacao TEXT)''')
     conn.commit()
@@ -46,12 +46,15 @@ def salvar_no_banco(nome, eta, etb, etd, clp):
     conn.close()
 
 def ler_do_banco(nome):
-    conn = sqlite3.connect('monitor_navios.db')
-    c = conn.cursor()
-    c.execute("SELECT eta, etb, etd, clp FROM navios WHERE nome=?", (nome,))
-    res = c.fetchone()
-    conn.close()
-    return res if res else ("-", "-", "-", "❌ PENDENTE")
+    try:
+        conn = sqlite3.connect('monitor_navios.db')
+        c = conn.cursor()
+        c.execute("SELECT eta, etb, etd, clp FROM navios WHERE nome=?", (nome,))
+        res = c.fetchone()
+        conn.close()
+        return res if res else ("-", "-", "-", "❌ PENDENTE")
+    except:
+        return ("-", "-", "-", "❌ PENDENTE")
 
 # --- FUNÇÕES DE APOIO ---
 
@@ -98,7 +101,6 @@ def buscar_dados():
         mail = imaplib.IMAP4_SSL("imap.gmail.com", timeout=30)
         mail.login(EMAIL_USER, EMAIL_PASS)
         
-        # 1. LISTA NAVIOS
         mail.select("INBOX", readonly=True)
         _, data_lista = mail.search(None, '(SUBJECT "LISTA NAVIOS")')
         slz_bruto, bel_bruto = [], []
@@ -117,7 +119,6 @@ def buscar_dados():
             if len(partes) > 1:
                 bel_bruto = [l.strip() for l in partes[1].split('\n') if 3 < len(l.strip()) < 60]
 
-        # 2. PROSPECTS
         mail.select(f'"{LABEL_PROSPECT}"', readonly=True)
         hoje_str = datetime.now(BR_TZ).strftime("%d-%b-%Y")
         _, data_p = mail.search(None, f'(SINCE "{hoje_str}")')
@@ -137,7 +138,6 @@ def buscar_dados():
                         corpo_p = part.get_payload(decode=True).decode(errors="ignore")
                 prospects_list.append({"subj": subj, "date": envio_br, "datas": extrair_datas_prospect(corpo_p, envio_br)})
 
-        # 3. CLP
         mail.select(f'"{LABEL_CLP}"', readonly=True)
         _, data_clp = mail.search(None, "ALL")
         clps = []
@@ -151,6 +151,30 @@ def buscar_dados():
         return slz_bruto, bel_bruto, prospects_list, clps
     except Exception as e: return None, None, str(e), []
 
+# --- FUNÇÃO DE E-MAIL ---
+
+def enviar_email_relatorio(dados_slz, dados_bel):
+    try:
+        msg = MIMEMultipart()
+        msg['From'] = EMAIL_USER
+        msg['To'] = DESTINATARIO
+        msg['Subject'] = f"🚢 Monitor Operacional WS - {datetime.now(BR_TZ).strftime('%d/%m %H:%M')}"
+
+        def gerar_linhas(lista):
+            h = ""
+            for r in lista:
+                c_am = "#d4edda" if r["AM"] == "✅" else "#f8d7da"
+                c_pm = "#d4edda" if r["PM"] == "✅" else "#f8d7da"
+                c_clp = "#fff3cd" if "CRÍTICO" in r["CLP"] else ("#d4edda" if "EMITIDA" in r["CLP"] else "#f8d7da")
+                h += f"<tr><td style='border:1px solid #ddd;padding:8px;'>{r['Navio']}</td><td style='background:{c_am};text-align:center;'>{r['AM']}</td><td style='background:{c_pm};text-align:center;'>{r['PM']}</td><td style='text-align:center;'>{r['ETA']}</td><td style='text-align:center;'>{r['ETB']}</td><td style='text-align:center;'>{r['ETD']}</td><td style='background:{c_clp};text-align:center;'>{r['CLP']}</td></tr>"
+            return h
+
+        corpo = f"<html><body><h2>Relatório Wilson Sons</h2><table style='border-collapse:collapse;width:100%;'><tr style='background:#004a99;color:white;'><th>Navio</th><th>AM</th><th>PM</th><th>ETA</th><th>ETB</th><th>ETD</th><th>CLP</th></tr>{gerar_linhas(dados_slz)}</table><br><h3>Belém</h3><table style='border-collapse:collapse;width:100%;'>{gerar_linhas(dados_bel)}</table></body></html>"
+        msg.attach(MIMEText(corpo, 'html'))
+        s = smtplib.SMTP('smtp.gmail.com', 587); s.starttls(); s.login(EMAIL_USER, EMAIL_PASS); s.send_message(msg); s.quit()
+        return True
+    except Exception as e: st.error(f"Erro e-mail: {e}"); return False
+
 # --- UI ---
 st.set_page_config(page_title="Monitor WS", layout="wide")
 init_db()
@@ -162,52 +186,38 @@ col1, col2 = st.columns(2)
 with col1:
     if st.button("🔄 ATUALIZAR AGORA", use_container_width=True, type="primary"):
         with st.spinner("Sincronizando..."):
-            slz, bel, prospects, clps = buscar_dados()
-            if slz is not None:
-                hoje_agora = datetime.now(BR_TZ) # Definição global para evitar NameError
-                
-                def montar(lista, p_filtro=None):
+            slz_res, bel_res, prospects, clps = buscar_dados()
+            if slz_res is not None:
+                agora = datetime.now(BR_TZ)
+                def montar(lista):
                     res = []
                     for n in lista:
                         nome = re.sub(r'^(MV|M/V|MT|M/T)\s+', '', n.strip(), flags=re.IGNORECASE).split(' - ')[0].split(' (')[0].strip().upper()
-                        porto = re.search(r'\((.*?)\)', n).group(1).strip().upper() if '(' in n else None
                         match = [e for e in prospects if nome in e["subj"]]
-                        if p_filtro and porto and len(match) > 1:
-                            m_p = [e for e in match if porto in e["subj"]]
-                            if m_p: match = m_p
-                        
                         match.sort(key=lambda x: x["date"], reverse=True)
-                        info_db = ler_do_banco(nome)
-                        
-                        # Datas
-                        eta = match[0]["datas"]["ETA"] if match else info_db[0]
-                        etb = match[0]["datas"]["ETB"] if match else info_db[1]
-                        etd = match[0]["datas"]["ETD"] if match else info_db[2]
-                        
-                        # Lógica CLP
+                        db = ler_do_banco(nome)
+                        eta = match[0]["datas"]["ETA"] if match else db[0]
+                        etb = match[0]["datas"]["ETB"] if match else db[1]
+                        etd = match[0]["datas"]["ETD"] if match else db[2]
                         tem_clp = any(nome in s for s in clps)
-                        status_clp = "✅ EMITIDA" if tem_clp else "❌ PENDENTE"
-                        
+                        clp_st = "✅ EMITIDA" if tem_clp else "❌ PENDENTE"
                         if not tem_clp and eta != "-":
                             try:
                                 d, m, a = eta.split("/")
-                                data_eta = datetime(int(a), int(m), int(d), tzinfo=BR_TZ)
-                                if (data_eta - hoje_agora).days <= 4: status_clp = "⚠️ CRÍTICO"
+                                d_eta = datetime(int(a), int(m), int(d), tzinfo=BR_TZ)
+                                if (d_eta - agora).days <= 4: clp_st = "⚠️ CRÍTICO"
                             except: pass
-                        
-                        salvar_no_banco(nome, eta, etb, etd, status_clp)
-                        res.append({"Navio": n, "AM": "✅" if any(e["date"].hour < 13 for e in match) else "❌", "PM": "✅" if any(e["date"].hour >= 13 for e in match) else "❌", "ETA": eta, "ETB": etb, "ETD": etd, "CLP": status_clp})
+                        salvar_no_banco(nome, eta, etb, etd, clp_st)
+                        res.append({"Navio": n, "AM": "✅" if any(e["date"].hour < 13 for e in match) else "❌", "PM": "✅" if any(e["date"].hour >= 13 for e in match) else "❌", "ETA": eta, "ETB": etb, "ETD": etd, "CLP": clp_st})
                     return res
-                
-                st.session_state.dados = {
-                    "slz": montar(slz), 
-                    "bel": montar(bel, p_filtro="BELEM"), 
-                    "at": hoje_agora.strftime("%H:%M:%S") # Corrigido aqui
-                }
+                st.session_state.dados = {"slz": montar(slz_res), "bel": montar(bel_res), "at": agora.strftime("%H:%M:%S")}
 
 with col2:
     if st.button("📧 ENVIAR POR E-MAIL", use_container_width=True):
-        st.info("Função de envio disparada para leonardo.alves@wilsonsons.com.br")
+        if st.session_state.dados["slz"]:
+            if enviar_email_relatorio(st.session_state.dados["slz"], st.session_state.dados["bel"]):
+                st.success("E-mail enviado!")
+        else: st.warning("Atualize primeiro.")
 
 if st.session_state.dados["at"] != "-":
     st.write(f"Última atualização: **{st.session_state.dados['at']}**")
