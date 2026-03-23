@@ -13,7 +13,6 @@ BR_TZ = pytz.timezone('America/Sao_Paulo')
 # --- CONFIGURAÇÕES ---
 EMAIL_USER = "leonardo.alves@wilsonsons.com.br"
 EMAIL_PASS = "nlvr vmyv cbcq oexe"
-DESTINATARIO = "leonardo.alves@wilsonsons.com.br"
 
 REMETENTES_VALIDOS = ["operation.sluis", "operation.belem", "agencybrazil"]
 TERMOS_PROSPECT = ["PROSPECT", "ARRIVAL", "NOR TENDERED", "BERTHING", "BERTH", "DAILY"]
@@ -52,12 +51,12 @@ def salvar_banco(nome_id, eta, etb, etd, clp):
         conn.close()
     except: pass
 
-def limpar_html_basico(txt):
+def limpar_html_local(txt):
     if not txt: return ""
-    # Substitui tags de linha por quebra de linha real
     txt = re.sub(r'<(div|p|br|tr|/tr|/div|li|/li)[^>]*>', '\n', txt)
     limpo = re.sub(r'<[^>]+>', '', txt)
-    return limpo
+    linhas = [l.strip() for l in limpo.split('\n') if len(l.strip()) > 3]
+    return "\n".join(linhas)
 
 def extrair_corpo_email(msg):
     corpo = ""
@@ -74,7 +73,7 @@ def extrair_corpo_email(msg):
 
 def extrair_datas_prospect(corpo_sujo, envio):
     res = {"ETA": "-", "ETB": "-", "ETD": "-"}
-    txt = limpar_html_basico(corpo_sujo).upper()
+    txt = limpar_html_local(corpo_sujo).upper()
     txt = " ".join(txt.split())
     meses_map = {'JAN':1,'FEB':2,'MAR':3,'APR':4,'MAY':5,'JUN':6,'JUL':7,'AUG':8,'SEP':9,'OCT':10,'NOV':11,'DEC':12}
     
@@ -123,19 +122,25 @@ with c1:
                 slz_raw, bel_raw = [], []
                 if d_l[0]:
                     _, d = mail.fetch(d_l[0].split()[-1], '(RFC822)')
-                    conteudo_bruto = extrair_corpo_email(email.message_from_bytes(d[0][1]))
+                    corpo_bruto = extrair_corpo_email(email.message_from_bytes(d[0][1]))
                     
-                    # SEPARA AS LISTAS ANTES DA LIMPEZA TOTAL
-                    if "BELEM:" in conteudo_bruto.upper():
-                        partes = re.split(r'BELEM:', conteudo_bruto, flags=re.IGNORECASE)
-                        slz_txt = limpar_html_basico(partes[0].replace('SLZ:', ''))
-                        bel_txt = limpar_html_basico(partes[1])
+                    # --- DIVISÃO CRÍTICA DAS LISTAS ---
+                    # Busca a posição da palavra BELEM ignorando maiúsculas/minúsculas
+                    match_belem = re.search(r'BELEM:', corpo_bruto, re.IGNORECASE)
+                    
+                    if match_belem:
+                        pos = match_belem.start()
+                        parte_slz = corpo_bruto[:pos]
+                        parte_bel = corpo_bruto[pos:]
+                        
+                        txt_slz = limpar_html_local(parte_slz.replace('SLZ:', ''))
+                        txt_bel = limpar_html_local(parte_bel.replace('BELEM:', ''))
                     else:
-                        slz_txt = limpar_html_basico(conteudo_bruto)
-                        bel_txt = ""
+                        txt_slz = limpar_html_local(corpo_bruto)
+                        txt_bel = ""
 
-                    slz_raw = [l.strip() for l in slz_txt.split('\n') if len(l.strip()) > 4 and "SLZ:" not in l.upper()]
-                    bel_raw = [l.strip() for l in bel_txt.split('\n') if len(l.strip()) > 4]
+                    slz_raw = [l.strip() for l in txt_slz.split('\n') if len(l.strip()) > 3 and "SLZ:" not in l.upper()]
+                    bel_raw = [l.strip() for l in txt_bel.split('\n') if len(l.strip()) > 3 and "BELEM:" not in l.upper()]
 
                 mail.select("PROSPECT", readonly=True)
                 _, d_p = mail.search(None, f'(SINCE "{(agora - timedelta(days=1)).strftime("%d-%b-%Y")}")')
@@ -151,7 +156,7 @@ with c1:
 
                 mail.logout()
 
-                def processar(lista, is_belem=False):
+                def processar(lista, belem=False):
                     res = []
                     for n in lista:
                         n_id = re.sub(r'^(MV|M/V|MT|M/T)\s+', '', n.upper()).split(' - ')[0].split(' (')[0].strip()
@@ -164,7 +169,7 @@ with c1:
                         etd = p_datas["ETD"] if p_datas["ETD"] != "-" else db[2]
                         salvar_banco(n, eta, etb, etd, "❌ PENDENTE")
                         today_m = [e for e in matches if e["date"].date() == agora.date()]
-                        res.append({"Navio": limpar_visual_nome(n) if is_belem else n, 
+                        res.append({"Navio": limpar_visual_nome(n) if belem else n, 
                                     "Prospect Manhã": "✅" if any(e["date"].hour < 13 for e in today_m) else "❌", 
                                     "Prospect Tarde": "✅" if any(e["date"].hour >= 13 for e in today_m) else "❌", 
                                     "ETA": eta, "ETB": etb, "ETD": etd})
