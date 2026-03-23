@@ -44,6 +44,7 @@ def salvar_banco(nome_id, eta, etb, etd, clp):
         conn = sqlite3.connect('monitor_navios.db', check_same_thread=False)
         c = conn.cursor()
         ex = ler_banco(nome_id)
+        # SÓ SUBSTITUI SE FOR VÁLIDO. Evita que o "05/03" sobrescreva dados corretos.
         eta_f = eta if (eta != "-" and eta is not None) else ex[0]
         etb_f = etb if (etb != "-" and etb is not None) else ex[1]
         etd_f = etd if (etd != "-" and etd is not None) else ex[2]
@@ -59,9 +60,11 @@ def extrair_corpo_email(msg):
     try:
         if msg.is_multipart():
             for parte in msg.walk():
-                if parte.get_content_type() == 'text/plain':
-                    return parte.get_payload(decode=True).decode(errors='ignore')
-        return msg.get_payload(decode=True).decode(errors='ignore')
+                if parte.get_content_type() in ['text/plain', 'text/html']:
+                    p = parte.get_payload(decode=True).decode(errors='ignore')
+                    corpo += p
+        else:
+            corpo = msg.get_payload(decode=True).decode(errors='ignore')
     except: pass
     return corpo
 
@@ -83,33 +86,46 @@ def limpar_visual_nome(n):
     limpo = limpo.split(' - ')[0].split(' (')[0].strip()
     return f"{limpo} {p_str}".strip()
 
+# --- EXTRAÇÃO COM DUPLA VERIFICAÇÃO ---
 def extrair_datas_prospect(corpo_sujo, envio):
     res = {"ETA": "-", "ETB": "-", "ETD": "-"}
+    # Remove HTML mas mantém estrutura básica
     txt = re.sub(r'<[^>]+>', ' ', corpo_sujo).upper()
     txt = " ".join(txt.split())
     meses_map = {'JAN':1,'FEB':2,'MAR':3,'APR':4,'MAY':5,'JUN':6,'JUL':7,'AUG':8,'SEP':9,'OCT':10,'NOV':11,'DEC':12}
+    hoje = datetime.now(BR_TZ).replace(hour=0, minute=0, second=0, microsecond=0)
     
     def parse_data(s):
         m_mes = re.search(r'(JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)', s)
         m_dia = re.search(r'(\d{1,2})', s)
         if m_mes and m_dia:
-            return f"{int(m_dia.group(1)):02d}/{meses_map[m_mes.group(1)]:02d}/{envio.year}"
+            dia, mes = int(m_dia.group(1)), meses_map[m_mes.group(1)]
+            dt_encontrada = datetime(envio.year, mes, dia, tzinfo=BR_TZ)
+            # DUPLA VERIFICAÇÃO: Se a data for mais de 15 dias no passado, ignoramos (evita pegar 05/03)
+            if dt_encontrada < (hoje - timedelta(days=15)):
+                return "-"
+            return f"{dia:02d}/{mes:02d}/{envio.year}"
         return "-"
 
-    termos = [
+    # Hierarquia Rigorosa: Busca apenas o texto IMEDIATAMENTE após os termos
+    termos_eta = [
         r"NOTICE OF READINESS\s*[:\-]?\s*([A-Z]{3,}\s+\d{1,2})",
         r"ARRIVAL AT ROADS\s*[:\-]?\s*([A-Z]{3,}\s+\d{1,2})",
-        r"ETA\s+.*?(JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)\s*(\d{1,2})",
+        r"ETA AT MOSQUEIRO\s*[:\-]?\s*([A-Z]{3,}\s+\d{1,2})",
+        r"ETA AT VILA\s*[:\-]?\s*([A-Z]{3,}\s+\d{1,2})",
         r"ETA\s*[:\-]?\s*([A-Z]{3,}\s+\d{1,2})"
     ]
-    for t in termos:
+    
+    for t in termos_eta:
         m = re.search(t, txt)
         if m:
-            dt = parse_data(m.group(0) if "ETA" in t else m.group(1))
-            if dt != "-": 
-                res["ETA"] = dt
+            val = parse_data(m.group(1))
+            if val != "-":
+                res["ETA"] = val
                 break
+
     for k in ["ETB", "ETD", "ETS"]:
+        # Busca o termo e pega apenas os 20 caracteres seguintes para não pegar datas de outros navios
         m = re.search(rf"{k}\s*[:\-]?\s*([A-Z]{{3,}}\s+\d{{1,2}})", txt)
         if m:
             dt = parse_data(m.group(1))
@@ -126,12 +142,12 @@ if 'at' not in st.session_state: st.session_state.at = "-"
 
 if st.button("🔄 ATUALIZAR AGORA", use_container_width=True, type="primary"):
     try:
-        with st.status("Sincronizando...", expanded=True) as status:
+        with st.status("Verificando datas e CLP...", expanded=True) as status:
             mail = imaplib.IMAP4_SSL("imap.gmail.com")
             mail.login(EMAIL_USER, EMAIL_PASS)
             agora = datetime.now(BR_TZ)
             
-            # 1. LISTA NAVIOS (INBOX)
+            # 1. LISTA NAVIOS
             mail.select("INBOX", readonly=True)
             _, d_l = mail.search(None, '(SUBJECT "LISTA NAVIOS")')
             slz_raw, bel_raw = [], []
@@ -139,18 +155,13 @@ if st.button("🔄 ATUALIZAR AGORA", use_container_width=True, type="primary"):
                 _, d = mail.fetch(d_l[0].split()[-1], '(RFC822)')
                 corpo_lista = extrair_corpo_email(email.message_from_bytes(d[0][1]))
                 linhas = [l.strip() for l in corpo_lista.split('\n') if len(l.strip()) > 1]
-                
-                # Lógica de Captura Blindada
                 secao = None
                 for linha in linhas:
                     l_upper = linha.upper()
                     if "SLZ" in l_upper: secao = "SLZ"; continue
                     if "BELEM" in l_upper: secao = "BEL"; continue
-                    
-                    if secao == "SLZ" and len(linha) > 3:
-                        slz_raw.append(linha)
-                    elif secao == "BEL" and len(linha) > 3:
-                        bel_raw.append(linha)
+                    if secao == "SLZ" and len(linha) > 3: slz_raw.append(linha)
+                    elif secao == "BEL" and len(linha) > 3: bel_raw.append(linha)
 
             # 2. PROSPECTS
             mail.select("PROSPECT", readonly=True)
@@ -177,8 +188,11 @@ if st.button("🔄 ATUALIZAR AGORA", use_container_width=True, type="primary"):
                     n_id = re.sub(r'^(MV|M/V|MT|M/T)\s+', '', n.upper()).split(' - ')[0].split(' (')[0].strip()
                     matches = [e for e in prospy if n_id in e["subj"]]
                     matches.sort(key=lambda x: x["date"], reverse=True)
+                    
                     p_datas = matches[0]["datas"] if matches else {"ETA":"-","ETB":"-","ETD":"-"}
                     db = ler_banco(n)
+                    
+                    # Logica de Dupla Verificação: Só aceita se a data do prospect for válida
                     eta = p_datas["ETA"] if p_datas["ETA"] != "-" else db[0]
                     etb = p_datas["ETB"] if p_datas["ETB"] != "-" else db[1]
                     etd = p_datas["ETD"] if p_datas["ETD"] != "-" else db[2]
@@ -186,8 +200,12 @@ if st.button("🔄 ATUALIZAR AGORA", use_container_width=True, type="primary"):
                     tem_clp = any(n_id in s for s in clps_list)
                     st_clp = "✅ EMITIDA" if tem_clp else "❌ PENDENTE"
                     salvar_banco(n, eta, etb, etd, st_clp)
+                    
                     today_m = [e for e in matches if e["date"].date() == agora.date()]
-                    res.append({"Navio": limpar_visual_nome(n) if belem else n, "Prospect Manhã": "✅" if any(e["date"].hour < 13 for e in today_m) else "❌", "Prospect Tarde": "✅" if any(e["date"].hour >= 13 for e in today_m) else "❌", "ETA": eta, "ETB": etb, "ETD": etd, "CLP": st_clp})
+                    res.append({"Navio": limpar_visual_nome(n) if belem else n, 
+                                "Prospect Manhã": "✅" if any(e["date"].hour < 13 for e in today_m) else "❌", 
+                                "Prospect Tarde": "✅" if any(e["date"].hour >= 13 for e in today_m) else "❌", 
+                                "ETA": eta, "ETB": etb, "ETD": etd, "CLP": st_clp})
                 return res
 
             st.session_state.slz = processar(slz_raw, False)
