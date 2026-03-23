@@ -14,6 +14,7 @@ DESTINATARIO = "leonardo.alves@wilsonsons.com.br"
 LABEL_PROSPECT = "PROSPECT"
 BR_TZ = pytz.timezone('America/Sao_Paulo')
 
+# Atualização automática a cada 5 minutos
 st_autorefresh(interval=300000, key="auto_refresh")
 
 # --- FUNÇÕES DE APOIO ---
@@ -33,6 +34,7 @@ def formatar_data_br(texto_data, data_referencia):
             dia, mes = int(dia_match.group(1)), meses_en[mes_match.group(1)]
             ano = data_referencia.year
             data_dt = datetime(ano, mes, dia)
+            # Trava de segurança de 45 dias
             if (data_referencia.replace(tzinfo=None) - data_dt).days > 45: return None
             return f"{dia:02d}/{mes:02d}/{ano}"
     except: pass
@@ -47,6 +49,7 @@ def extrair_datas_prospect(corpo, data_email):
         if m:
             dt = formatar_data_br(m.group(1).strip(), data_email)
             if dt: res["ETD" if k == "ETS" else k] = dt
+    # Hierarquia: Arrival -> NOR -> ETA
     for g in ["ARRIVAL AT ROADS", "NOTICE OF READINESS", "NOR TENDERED", "ETA"]:
         m = re.search(rf"{g}\s+.*?([A-Z]{{3,}}\s+\d{{1,2}}(?:ST|ND|RD|TH)?)", txt)
         if m:
@@ -105,7 +108,7 @@ def buscar_dados():
         return slz_bruto, bel_bruto, prospects_list
     except Exception as e: return None, None, str(e)
 
-# --- FUNÇÃO DE ENVIO DE E-MAIL ---
+# --- FUNÇÃO DE E-MAIL ---
 
 def enviar_email_relatorio(dados_slz, dados_bel):
     try:
@@ -131,24 +134,23 @@ def enviar_email_relatorio(dados_slz, dados_bel):
             return html
 
         corpo_html = f"""
-        <html><body style="font-family: Arial, sans-serif;">
+        <html><body>
             <h2 style="color: #004a99;">Relatório Operacional Wilson Sons</h2>
             <p>Sincronizado em: {datetime.now(BR_TZ).strftime('%d/%m/%Y %H:%M:%S')}</p>
-            
-            <h3 style="background-color: #f2f2f2; padding: 5px;">📍 São Luís</h3>
+            <h3>📍 São Luís</h3>
             <table style="border-collapse: collapse; width: 100%;">
-                <thead><tr style="background-color: #004a99; color: white;">
+                <tr style="background-color: #004a99; color: white;">
                     <th>Navio</th><th>AM</th><th>PM</th><th>ETA/Arrival</th><th>ETB</th><th>ETD</th>
-                </tr></thead>
-                <tbody>{gerar_linhas(dados_slz)}</tbody>
+                </tr>
+                {gerar_linhas(dados_slz)}
             </table>
-
-            <h3 style="background-color: #f2f2f2; padding: 5px; margin-top: 20px;">📍 Belém</h3>
+            <br>
+            <h3>📍 Belém</h3>
             <table style="border-collapse: collapse; width: 100%;">
-                <thead><tr style="background-color: #004a99; color: white;">
+                <tr style="background-color: #004a99; color: white;">
                     <th>Navio</th><th>AM</th><th>PM</th><th>ETA/Arrival</th><th>ETB</th><th>ETD</th>
-                </tr></thead>
-                <tbody>{gerar_linhas(dados_bel)}</tbody>
+                </tr>
+                {gerar_linhas(dados_bel)}
             </table>
         </body></html>
         """
@@ -174,12 +176,13 @@ col_btn1, col_btn2 = st.columns([1, 1])
 
 with col_btn1:
     if st.button("🔄 ATUALIZAR AGORA", use_container_width=True, type="primary"):
-        with st.spinner("Sincronizando..."):
-            slz, bel, prospects = buscar_dados()
-            if slz is not None:
-                def montar(lista, p_filtro=None):
+        with st.spinner("Sincronizando dados..."):
+            slz_res, bel_res, prospects = buscar_dados()
+            if slz_res is not None:
+                # FUNÇÃO MONTAR CORRIGIDA (p_filtro)
+                def montar(lista_crua, p_filtro=None):
                     res = []
-                    for n in lista:
+                    for n in lista_crua:
                         nome = re.sub(r'^(MV|M/V|MT|M/T)\s+', '', n.strip(), flags=re.IGNORECASE).split(' - ')[0].split(' (')[0].strip().upper()
                         porto = re.search(r'\((.*?)\)', n).group(1).strip().upper() if '(' in n else None
                         match = [e for e in prospects if nome in e["subj"]]
@@ -193,16 +196,21 @@ with col_btn1:
                                     "PM": "✅" if any(e["date"].hour >= 13 for e in match) else "❌",
                                     "ETA/Arrival": info["ETA"], "ETB": info["ETB"], "ETD": info["ETD"]})
                     return res
-                st.session_state.dados = {"slz": montar(slz), "bel": montar(bel, porto_filtro="BELEM"), "at": datetime.now(BR_TZ).strftime("%H:%M:%S")}
+
+                st.session_state.dados = {
+                    "slz": montar(slz_res),
+                    "bel": montar(bel_res, p_filtro="BELEM"), # Nome corrigido aqui
+                    "at": datetime.now(BR_TZ).strftime("%H:%M:%S")
+                }
 
 with col_btn2:
     if st.button("📧 ENVIAR RELATÓRIO POR E-MAIL", use_container_width=True):
         if st.session_state.dados["slz"]:
-            with st.spinner("Enviando e-mail..."):
+            with st.spinner("Enviando..."):
                 if enviar_email_relatorio(st.session_state.dados["slz"], st.session_state.dados["bel"]):
-                    st.success(f"Relatório enviado para {DESTINATARIO}")
+                    st.success(f"E-mail enviado!")
         else:
-            st.warning("Primeiro clique em 'Atualizar Agora' para gerar os dados.")
+            st.warning("Atualize os dados primeiro.")
 
 if st.session_state.dados["at"] != "-":
     st.write(f"Última atualização: **{st.session_state.dados['at']}**")
