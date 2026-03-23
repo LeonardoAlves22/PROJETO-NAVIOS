@@ -24,8 +24,6 @@ def init_db():
         c = conn.cursor()
         c.execute('''CREATE TABLE IF NOT EXISTS navios 
                      (nome TEXT PRIMARY KEY, eta TEXT, etb TEXT, etd TEXT, clp TEXT, atualizacao TEXT)''')
-        try: c.execute("ALTER TABLE navios ADD COLUMN clp TEXT")
-        except: pass
         conn.commit()
         conn.close()
     except: pass
@@ -54,22 +52,23 @@ def salvar_banco(nome_id, eta, etb, etd, clp):
         conn.close()
     except: pass
 
-# --- LIMPEZA DE TEXTO (REMOVE DIVS E TAGS) ---
-def limpar_texto_bruto(txt):
+# --- LIMPEZA DE TEXTO (PRESERVANDO QUEBRAS DE LINHA) ---
+def limpar_html_mantendo_linhas(txt):
     if not txt: return ""
-    # Remove qualquer tag HTML (ex: <div>, <br>, </td>)
-    limpo = re.sub(r'<[^>]+>', ' ', txt)
-    # Remove espaços duplos e quebras de linha
-    limpo = " ".join(limpo.split())
-    return limpo.strip()
+    # Substitui tags de fechamento de linha/parágrafo por uma quebra de linha real
+    txt = re.sub(r'<(div|p|br|tr|/tr|/div|li|/li)[^>]*>', '\n', txt)
+    # Remove qualquer outra tag HTML restante
+    limpo = re.sub(r'<[^>]+>', '', txt)
+    # Remove espaços duplos horizontais mas mantém as quebras de linha
+    linhas = [l.strip() for l in limpo.split('\n') if len(l.strip()) > 2]
+    return "\n".join(linhas)
 
 def extrair_corpo_email(msg):
     corpo = ""
     try:
         if msg.is_multipart():
             for parte in msg.walk():
-                tipo = parte.get_content_type()
-                if tipo in ['text/plain', 'text/html']:
+                if parte.get_content_type() in ['text/plain', 'text/html']:
                     p = parte.get_payload(decode=True).decode(errors='ignore')
                     corpo += p
         else:
@@ -79,8 +78,7 @@ def extrair_corpo_email(msg):
 
 def extrair_datas_prospect(corpo_sujo, envio):
     res = {"ETA": "-", "ETB": "-", "ETD": "-"}
-    txt = limpar_texto_bruto(corpo_sujo).upper()
-    
+    txt = limpar_html_mantendo_linhas(corpo_sujo).upper()
     meses_map = {'JAN':1,'FEB':2,'MAR':3,'APR':4,'MAY':5,'JUN':6,'JUL':7,'AUG':8,'SEP':9,'OCT':10,'NOV':11,'DEC':12}
     
     def parse_data(s):
@@ -90,10 +88,8 @@ def extrair_datas_prospect(corpo_sujo, envio):
             return f"{int(m_dia.group(1)):02d}/{meses_map[m_mes.group(1)]:02d}/{envio.year}"
         return "-"
 
-    # Busca universal para ETA/ETB/ETD
     m_eta = re.search(r"ETA\s+.*?(JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)\s*(\d{1,2})", txt)
     if m_eta: res["ETA"] = parse_data(m_eta.group(0))
-    
     for k in ["ETB", "ETD", "ETS"]:
         m = re.search(rf"{k}\s*[:\-]?\s*([A-Z]{{3,}}\s*\d{{1,2}})", txt)
         if m:
@@ -102,7 +98,6 @@ def extrair_datas_prospect(corpo_sujo, envio):
     return res
 
 def limpar_visual_nome(n):
-    n = limpar_texto_bruto(n) # Remove <div> se vier da lista
     porto = re.search(r'(\(.*?\))', n)
     p_str = porto.group(1) if porto else ""
     limpo = re.sub(r'^(MV|M/V|MT|M/T)\s+', '', n.upper())
@@ -132,11 +127,10 @@ with c1:
                 if d_l[0]:
                     _, d = mail.fetch(d_l[0].split()[-1], '(RFC822)')
                     conteudo_lista = extrair_corpo_email(email.message_from_bytes(d[0][1]))
-                    # Limpa o conteúdo da lista antes de quebrar em linhas
-                    conteudo_limpo = limpar_texto_bruto(conteudo_lista)
+                    conteudo_limpo = limpar_html_mantendo_linhas(conteudo_lista)
                     pts = re.split(r'BELEM:', conteudo_limpo, flags=re.IGNORECASE)
-                    slz_raw = [l.strip() for l in pts[0].replace('SLZ:', '').split('\n') if len(l.strip()) > 5]
-                    if len(pts) > 1: bel_raw = [l.strip() for l in pts[1].split('\n') if len(l.strip()) > 5]
+                    slz_raw = [l.strip() for l in pts[0].replace('SLZ:', '').split('\n') if len(l.strip()) > 3]
+                    if len(pts) > 1: bel_raw = [l.strip() for l in pts[1].split('\n') if len(l.strip()) > 3]
 
                 mail.select("PROSPECT", readonly=True)
                 _, d_p = mail.search(None, f'(SINCE "{(agora - timedelta(days=1)).strftime("%d-%b-%Y")}")')
@@ -152,24 +146,20 @@ with c1:
 
                 mail.logout()
 
-                def processar(lista, is_belem=False):
+                def processar(lista, belem=False):
                     res = []
                     for n in lista:
-                        n_limpo = limpar_texto_bruto(n)
-                        n_id = re.sub(r'^(MV|M/V|MT|M/T)\s+', '', n_limpo.upper()).split(' - ')[0].split(' (')[0].strip()
+                        n_id = re.sub(r'^(MV|M/V|MT|M/T)\s+', '', n.upper()).split(' - ')[0].split(' (')[0].strip()
                         matches = [e for e in prospy if n_id in e["subj"]]
                         matches.sort(key=lambda x: x["date"], reverse=True)
-                        
                         p_datas = matches[0]["datas"] if matches else {"ETA":"-","ETB":"-","ETD":"-"}
-                        db = ler_banco(n_limpo)
+                        db = ler_banco(n)
                         eta = p_datas["ETA"] if p_datas["ETA"] != "-" else db[0]
                         etb = p_datas["ETB"] if p_datas["ETB"] != "-" else db[1]
                         etd = p_datas["ETD"] if p_datas["ETD"] != "-" else db[2]
-                        
-                        salvar_banco(n_limpo, eta, etb, etd, "❌ PENDENTE")
+                        salvar_banco(n, eta, etb, etd, "❌ PENDENTE")
                         today_m = [e for e in matches if e["date"].date() == agora.date()]
-                        
-                        res.append({"Navio": limpar_visual_nome(n_limpo) if is_belem else n_limpo, 
+                        res.append({"Navio": limpar_visual_nome(n) if belem else n, 
                                     "Prospect Manhã": "✅" if any(e["date"].hour < 13 for e in today_m) else "❌", 
                                     "Prospect Tarde": "✅" if any(e["date"].hour >= 13 for e in today_m) else "❌", 
                                     "ETA": eta, "ETB": etb, "ETD": etd})
