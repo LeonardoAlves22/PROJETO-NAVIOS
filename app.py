@@ -18,6 +18,7 @@ DESTINATARIO = "leonardo.alves@wilsonsons.com.br"
 REMETENTES_VALIDOS = ["operation.sluis", "operation.belem", "agencybrazil"]
 TERMOS_PROSPECT = ["PROSPECT", "ARRIVAL", "NOR TENDERED", "BERTHING", "BERTH", "DAILY"]
 
+# --- BANCO DE DADOS ---
 def init_db():
     try:
         conn = sqlite3.connect('monitor_navios.db', check_same_thread=False)
@@ -52,9 +53,49 @@ def salvar_banco(nome_id, eta, etb, etd, clp):
         conn.close()
     except: pass
 
-# --- EXTRAÇÃO DE DATAS COM HIERARQUIA (NOR > ARRIVAL > ETA) ---
+# --- FUNÇÕES DE APOIO (ESSENCIAIS) ---
+def extrair_corpo_email(msg):
+    """Extrai o conteúdo de texto ou HTML do e-mail de forma segura."""
+    corpo = ""
+    try:
+        if msg.is_multipart():
+            for parte in msg.walk():
+                tipo = parte.get_content_type()
+                if tipo in ['text/plain', 'text/html']:
+                    payload = parte.get_payload(decode=True)
+                    if payload:
+                        corpo = payload.decode(errors='ignore')
+                        if tipo == 'text/html': # Prioriza HTML se disponível
+                            break
+        else:
+            payload = msg.get_payload(decode=True)
+            if payload:
+                corpo = payload.decode(errors='ignore')
+    except: pass
+    return corpo
+
+def decodificar_assunto(m):
+    subj = m.get("Subject", "")
+    decoded = decode_header(subj)
+    res = ""
+    for part, enc in decoded:
+        if isinstance(part, bytes): 
+            res += part.decode(enc or 'utf-8', errors='ignore')
+        else: 
+            res += str(part)
+    return res.upper()
+
+def limpar_visual_nome(n):
+    n = n.upper()
+    porto = re.search(r'(\(.*?\))', n)
+    p_str = porto.group(1) if porto else ""
+    limpo = re.sub(r'^(MV|M/V|MT|M/T)\s+', '', n)
+    limpo = limpo.split(' - ')[0].split(' (')[0].strip()
+    return f"{limpo} {p_str}".strip()
+
 def extrair_datas_prospect(corpo_sujo, envio):
     res = {"ETA": "-", "ETB": "-", "ETD": "-"}
+    # Limpa HTML para busca de texto
     txt = re.sub(r'<[^>]+>', ' ', corpo_sujo).upper()
     txt = " ".join(txt.split())
     meses_map = {'JAN':1,'FEB':2,'MAR':3,'APR':4,'MAY':5,'JUN':6,'JUL':7,'AUG':8,'SEP':9,'OCT':10,'NOV':11,'DEC':12}
@@ -66,64 +107,26 @@ def extrair_datas_prospect(corpo_sujo, envio):
             return f"{int(m_dia.group(1)):02d}/{meses_map[m_mes.group(1)]:02d}/{envio.year}"
         return "-"
 
-    # Hierarquia para ETA (Procura datas reais primeiro)
-    termos_chegada = [
+    # Hierarquia de datas (NOR > Arrival > ETA)
+    termos = [
         r"NOTICE OF READINESS\s*[:\-]?\s*([A-Z]{3,}\s+\d{1,2})",
         r"ARRIVAL AT ROADS\s*[:\-]?\s*([A-Z]{3,}\s+\d{1,2})",
-        r"ETA AT MOSQUEIRO\s*[:\-]?\s*([A-Z]{3,}\s+\d{1,2})",
+        r"ETA\s+.*?(JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)\s*(\d{1,2})",
         r"ETA\s*[:\-]?\s*([A-Z]{3,}\s+\d{1,2})"
     ]
-    
-    for t in termos_chegada:
+    for t in termos:
         m = re.search(t, txt)
         if m:
-            res["ETA"] = parse_data(m.group(1))
-            if res["ETA"] != "-": break
-
-    # ETB e ETD
+            dt = parse_data(m.group(0) if "ETA" in t else m.group(1))
+            if dt != "-": 
+                res["ETA"] = dt
+                break
     for k in ["ETB", "ETD", "ETS"]:
         m = re.search(rf"{k}\s*[:\-]?\s*([A-Z]{{3,}}\s+\d{{1,2}})", txt)
         if m:
             dt = parse_data(m.group(1))
             if dt != "-": res["ETD" if k=="ETS" else k] = dt
     return res
-
-def limpar_visual_nome(n):
-    n = n.upper()
-    porto = re.search(r'(\(.*?\))', n)
-    p_str = porto.group(1) if porto else ""
-    limpo = re.sub(r'^(MV|M/V|MT|M/T)\s+', '', n)
-    limpo = limpo.split(' - ')[0].split(' (')[0].strip()
-    return f"{limpo} {p_str}".strip()
-
-def decodificar_assunto(m):
-    subj = m.get("Subject", "")
-    decoded = decode_header(subj)
-    res = ""
-    for part, enc in decoded:
-        if isinstance(part, bytes): res += part.decode(enc or 'utf-8', errors='ignore')
-        else: res += str(part)
-    return res.upper()
-
-def enviar_relatorio(dados_slz, dados_bel):
-    try:
-        msg = MIMEMultipart()
-        msg['From'] = EMAIL_USER
-        msg['To'] = DESTINATARIO
-        msg['Subject'] = f"🚢 Monitor Operacional WS - {datetime.now(BR_TZ).strftime('%d/%m %H:%M')}"
-        def gerar_html(titulo, lista):
-            h = f"<h3 style='font-family:Arial; background:#f2f2f2; padding:8px;'>{titulo}</h3><table border='1' style='border-collapse:collapse; width:100%; font-family:Arial; font-size:12px;'>"
-            h += "<tr style='background:#004a99; color:white;'><th>Navio</th><th>Prospect Manhã</th><th>Prospect Tarde</th><th>ETA</th><th>ETB</th><th>ETD</th><th>CLP</th></tr>"
-            for r in lista:
-                c_am = "background:#d4edda;" if r["Prospect Manhã"] == "✅" else "background:#f8d7da;"
-                c_pm = "background:#d4edda;" if r["Prospect Tarde"] == "✅" else "background:#f8d7da;"
-                bg = "#d4edda" if "EMITIDA" in r['CLP'] else ("#fff3cd;" if "CRÍTICO" in r['CLP'] else "#f8d7da")
-                h += f"<tr style='text-align:center;'><td>{r['Navio']}</td><td style='{c_am}'>{r['Prospect Manhã']}</td><td style='{c_pm}'>{r['Prospect Tarde']}</td><td>{r['ETA']}</td><td>{r['ETB']}</td><td>{r['ETD']}</td><td style='background:{bg}'>{r['CLP']}</td></tr>"
-            return h + "</table><br>"
-        corpo = f"<html><body>{gerar_html('📍 São Luís', dados_slz)}{gerar_html('📍 Belém', dados_bel)}</body></html>"
-        msg.attach(MIMEText(corpo, 'html')); s = smtplib.SMTP('smtp.gmail.com', 587); s.starttls(); s.login(EMAIL_USER, EMAIL_PASS); s.send_message(msg); s.quit()
-        return True
-    except: return False
 
 # --- INTERFACE ---
 st.title("🚢 Monitor Operacional Wilson Sons")
@@ -142,7 +145,7 @@ with c1:
                 mail.login(EMAIL_USER, EMAIL_PASS)
                 agora = datetime.now(BR_TZ)
                 
-                # 1. LISTA (INBOX)
+                # 1. LISTA NAVIOS (INBOX)
                 mail.select("INBOX", readonly=True)
                 _, d_l = mail.search(None, '(SUBJECT "LISTA NAVIOS")')
                 slz_raw, bel_raw = [], []
@@ -190,12 +193,6 @@ with c1:
                         
                         tem_clp = any(n_id in s for s in clps_list)
                         st_clp = "✅ EMITIDA" if tem_clp else "❌ PENDENTE"
-                        if not tem_clp and eta != "-" and "/" in eta:
-                            try:
-                                d,m,a = eta.split("/"); d_eta = datetime(int(a),int(m),int(d), tzinfo=BR_TZ)
-                                if (d_eta - agora).days <= 4: st_clp = "⚠️ CRÍTICO"
-                            except: pass
-                        
                         salvar_banco(n, eta, etb, etd, st_clp)
                         today_m = [e for e in matches if e["date"].date() == agora.date()]
                         res.append({"Navio": limpar_visual_nome(n) if belem else n, "Prospect Manhã": "✅" if any(e["date"].hour < 13 for e in today_m) else "❌", "Prospect Tarde": "✅" if any(e["date"].hour >= 13 for e in today_m) else "❌", "ETA": eta, "ETB": etb, "ETD": etd, "CLP": st_clp})
@@ -203,10 +200,6 @@ with c1:
 
                 st.session_state.slz = processar(slz_raw, False); st.session_state.bel = processar(bel_raw, True); st.session_state.at = agora.strftime("%H:%M"); st.rerun()
         except Exception as e: st.error(f"Erro: {e}")
-
-with c2:
-    if st.button("📧 ENVIAR POR E-MAIL", use_container_width=True):
-        if st.session_state.slz and enviar_relatorio(st.session_state.slz, st.session_state.bel): st.success("Relatório enviado!")
 
 if st.session_state.at != "-":
     t1, t2 = st.tabs(["📍 São Luís", "📍 Belém"])
