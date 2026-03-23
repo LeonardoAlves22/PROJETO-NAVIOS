@@ -15,13 +15,14 @@ EMAIL_USER = "leonardo.alves@wilsonsons.com.br"
 EMAIL_PASS = "nlvr vmyv cbcq oexe"
 DESTINATARIO = "leonardo.alves@wilsonsons.com.br"
 
-# Remetentes permitidos para Prospect
+# Remetentes Oficiais
 REMETENTES_VALIDOS = ["operation.sluis", "operation.belem", "agencybrazil"]
 
-# Palavras-chave de assunto para Prospect
-ASSUNTOS_PROSPECT = [
-    "ARRIVAL NOTICE", "NOR TENDERED", "BERTHING PROSPECTS", 
-    "BERTHING PROSPECT", "BERTH NOTICE", "DAILY REPORT", "DAILY NOTICE"
+# Palavras-chave expandidas baseadas na imagem
+TERMOS_PROSPECT = [
+    "PROSPECT NOTICE", "ARRIVAL NOTICE", "NOR TENDERED", 
+    "BERTHING PROSPECT", "BERTHING PROSPECTS", "BERTH NOTICE", 
+    "DAILY REPORT", "DAILY NOTICE"
 ]
 
 def init_db():
@@ -60,31 +61,26 @@ def salvar_banco(nome, eta, etb, etd, clp):
         conn.close()
     except: pass
 
-# --- FUNÇÕES DE APOIO ---
 def decodificar_cabecalho(msg, campo):
     try:
         val = msg.get(campo)
         if val is None: return ""
         partes = decode_header(val)
         res = ""
-        for t, c in partes:
-            if isinstance(t, bytes): res += t.decode(c or 'utf-8', errors='ignore')
+        for t, encoding in partes:
+            if isinstance(t, bytes): res += t.decode(encoding or 'utf-8', errors='ignore')
             else: res += str(t)
         return res.upper().strip()
     except: return str(msg.get(campo) or "").upper().strip()
 
 def extrair_corpo_email(msg):
-    corpo = ""
     try:
         if msg.is_multipart():
             for parte in msg.walk():
                 if parte.get_content_type() == 'text/plain':
-                    corpo = parte.get_payload(decode=True).decode(errors='ignore')
-                    break
-        else:
-            corpo = msg.get_payload(decode=True).decode(errors='ignore')
-    except: pass
-    return corpo
+                    return parte.get_payload(decode=True).decode(errors='ignore')
+        return msg.get_payload(decode=True).decode(errors='ignore')
+    except: return ""
 
 def formatar_data_br(texto, ref):
     if not texto or texto == "-": return "-"
@@ -113,28 +109,6 @@ def extrair_datas_prospect(corpo, envio):
             if dt != "-": res["ETA"] = dt; break
     return res
 
-# --- RELATÓRIO E-MAIL ---
-def enviar_relatorio(dados_slz, dados_bel):
-    try:
-        msg = MIMEMultipart()
-        msg['From'] = EMAIL_USER
-        msg['To'] = DESTINATARIO
-        msg['Subject'] = f"🚢 Monitor Operacional WS - {datetime.now(BR_TZ).strftime('%d/%m %H:%M')}"
-        def gerar_html(titulo, lista):
-            h = f"<h3 style='font-family:Arial; background:#f2f2f2; padding:8px;'>{titulo}</h3><table border='1' style='border-collapse:collapse; width:100%; font-family:Arial; font-size:12px;'>"
-            h += "<tr style='background:#004a99; color:white;'><th>Navio</th><th>Prospect Manhã</th><th>Prospect Tarde</th><th>ETA</th><th>ETB</th><th>ETD</th><th>CLP</th></tr>"
-            for r in lista:
-                c_am = "background:#d4edda;" if r["Prospect Manhã"] == "✅" else "background:#f8d7da;"
-                c_pm = "background:#d4edda;" if r["Prospect Tarde"] == "✅" else "background:#f8d7da;"
-                bg = "#d4edda;" if "EMITIDA" in r['CLP'] else ("#fff3cd;" if "CRÍTICO" in r['CLP'] else "#f8d7da;")
-                h += f"<tr style='text-align:center;'><td>{r['Navio']}</td><td style='{c_am}'>{r['Prospect Manhã']}</td><td style='{c_pm}'>{r['Prospect Tarde']}</td><td>{r['ETA']}</td><td>{r['ETB']}</td><td>{r['ETD']}</td><td style='background:{bg}'>{r['CLP']}</td></tr>"
-            return h + "</table><br>"
-        corpo = f"<html><body>{gerar_html('📍 São Luís', dados_slz)}{gerar_html('📍 Belém', dados_bel)}</body></html>"
-        msg.attach(MIMEText(corpo, 'html'))
-        s = smtplib.SMTP('smtp.gmail.com', 587); s.starttls(); s.login(EMAIL_USER, EMAIL_PASS); s.send_message(msg); s.quit()
-        return True
-    except: return False
-
 # --- INTERFACE ---
 st.title("🚢 Monitor Operacional Wilson Sons")
 init_db()
@@ -152,20 +126,21 @@ with c1:
                 mail.login(EMAIL_USER, EMAIL_PASS)
                 agora = datetime.now(BR_TZ)
 
-                # 1. LISTA NAVIOS
+                # 1. LISTA NAVIOS (INBOX)
                 mail.select("INBOX", readonly=True)
                 _, d_l = mail.search(None, '(SUBJECT "LISTA NAVIOS")')
-                slz_raw, bel_raw = [], []
+                slz_r, bel_r = [], []
                 if d_l[0]:
                     _, d = mail.fetch(d_l[0].split()[-1], '(RFC822)')
-                    conteudo = extrair_corpo_email(email.message_from_bytes(d[0][1]))
-                    pts = re.split(r'BELEM:', conteudo, flags=re.IGNORECASE)
-                    slz_raw = [l.strip() for l in pts[0].replace('SLZ:', '').split('\n') if len(l.strip()) > 5]
-                    if len(pts) > 1: bel_raw = [l.strip() for l in pts[1].split('\n') if len(l.strip()) > 5]
+                    raw = extrair_corpo_email(email.message_from_bytes(d[0][1]))
+                    pts = re.split(r'BELEM:', raw, flags=re.IGNORECASE)
+                    slz_r = [l.strip() for l in pts[0].replace('SLZ:', '').split('\n') if len(l.strip()) > 5]
+                    if len(pts) > 1: bel_r = [l.strip() for l in pts[1].split('\n') if len(l.strip()) > 5]
 
-                # 2. PROSPECTS (Busca e-mails dos últimos 2 dias)
+                # 2. PROSPECTS (Busca ampla nos últimos 2 dias)
                 mail.select("PROSPECT", readonly=True)
-                _, d_p = mail.search(None, f'(SINCE "{(agora - timedelta(days=1)).strftime("%d-%b-%Y")}")')
+                data_busca = (agora - timedelta(days=1)).strftime("%d-%b-%Y")
+                _, d_p = mail.search(None, f'(SINCE "{data_busca}")')
                 prospy = []
                 if d_p[0]:
                     for eid in d_p[0].split()[-60:]:
@@ -173,14 +148,14 @@ with c1:
                         m = email.message_from_bytes(d[0][1])
                         assunto = decodificar_cabecalho(m, "Subject")
                         remetente = decodificar_cabecalho(m, "From").lower()
-                        envio = email.utils.parsedate_to_datetime(m.get("Date")).astimezone(BR_TZ)
                         
-                        # Verifica se o e-mail é de um remetente oficial e se o assunto é um dos tipos de Prospect
-                        is_valid_sender = any(ref in remetente for ref in REMETENTES_VALIDOS)
-                        is_valid_subject = any(term in assunto for term in ASSUNTOS_PROSPECT)
-                        
-                        if is_valid_sender and is_valid_subject:
-                            prospy.append({"subj": assunto, "date": envio, "datas": extrair_datas_prospect(extrair_corpo_email(m), envio)})
+                        # Verifica se é remetente operacional e se contém termos de Prospect
+                        if any(r in remetente for r in REMETENTES_VALIDOS) and any(t in assunto for t in TERMOS_PROSPECT):
+                            prospy.append({
+                                "subj": assunto, 
+                                "date": email.utils.parsedate_to_datetime(m.get("Date")).astimezone(BR_TZ),
+                                "datas": extrair_datas_prospect(extrair_corpo_email(m), agora)
+                            })
 
                 # 3. CLP
                 mail.select("CLP", readonly=True)
@@ -192,38 +167,47 @@ with c1:
                 def processar(lista):
                     final = []
                     for n in lista:
-                        nm_l = re.sub(r'^(MV|M/V|MT|M/T)\s+', '', n.strip(), flags=re.IGNORECASE).split(' - ')[0].split(' (')[0].strip().upper()
-                        all_matches = [e for e in prospy if nm_l in e["subj"]]
-                        all_matches.sort(key=lambda x: x["date"], reverse=True)
+                        # Nome base: Remove prefixos e sufixos
+                        nm_base = re.sub(r'^(MV|M/V|MT|M/T)\s+', '', n.strip(), flags=re.IGNORECASE).split(' - ')[0].split(' (')[0].strip().upper()
                         
-                        p_datas = all_matches[0]["datas"] if all_matches else {"ETA":"-","ETB":"-","ETD":"-"}
-                        db = ler_banco(nm_l)
+                        # Inteligência: Encontra e-mails onde o NOME DO NAVIO está contido no ASSUNTO
+                        matches = [e for e in prospy if nm_base in e["subj"]]
+                        matches.sort(key=lambda x: x["date"], reverse=True)
+                        
+                        # Pega datas do prospect mais recente
+                        p_datas = matches[0]["datas"] if matches else {"ETA":"-","ETB":"-","ETD":"-"}
+                        db = ler_banco(nm_base)
                         
                         eta = p_datas["ETA"] if p_datas["ETA"] != "-" else db[0]
                         etb = p_datas["ETB"] if p_datas["ETB"] != "-" else db[1]
                         etd = p_datas["ETD"] if p_datas["ETD"] != "-" else db[2]
                         
-                        tem_clp = any(nm_l in s for s in clps_l)
+                        # CLP por contenção
+                        tem_clp = any(nm_base in s for s in clps_l)
                         st_clp = "✅ EMITIDA" if tem_clp else "❌ PENDENTE"
+                        
                         if not tem_clp and eta != "-" and "/" in eta:
                             try:
                                 d,m,a = eta.split("/"); d_eta = datetime(int(a),int(m),int(d), tzinfo=BR_TZ)
                                 if (d_eta - agora).days <= 4: st_clp = "⚠️ CRÍTICO"
                             except: pass
                         
-                        salvar_banco(nm_l, eta, etb, etd, st_clp)
-                        # ✅ apenas para e-mails de HOJE
-                        today_matches = [e for e in all_matches if e["date"].date() == agora.date()]
-                        final.append({"Navio": n, "Prospect Manhã": "✅" if any(e["date"].hour < 13 for e in today_matches) else "❌", "Prospect Tarde": "✅" if any(e["date"].hour >= 13 for e in today_matches) else "❌", "ETA": eta, "ETB": etb, "ETD": etd, "CLP": st_clp})
+                        salvar_banco(nm_base, eta, etb, etd, st_clp)
+                        # ✅ apenas para Prospects recebidos HOJE
+                        today_m = [e for e in matches if e["date"].date() == agora.date()]
+                        final.append({
+                            "Navio": n, 
+                            "Prospect Manhã": "✅" if any(e["date"].hour < 13 for e in today_m) else "❌", 
+                            "Prospect Tarde": "✅" if any(e["date"].hour >= 13 for e in today_m) else "❌", 
+                            "ETA": eta, "ETB": etb, "ETD": etd, "CLP": st_clp
+                        })
                     return final
 
-                st.session_state.slz = processar(slz_raw); st.session_state.bel = processar(bel_raw); st.session_state.at = agora.strftime("%H:%M"); st.rerun()
+                st.session_state.slz = processar(slz_r)
+                st.session_state.bel = processar(bel_r)
+                st.session_state.at = agora.strftime("%H:%M")
+                st.rerun()
         except Exception as e: st.error(f"Erro: {e}")
-
-with c2:
-    if st.button("📧 ENVIAR POR E-MAIL", use_container_width=True):
-        if st.session_state.slz and enviar_relatorio(st.session_state.slz, st.session_state.bel):
-            st.success("E-mail enviado!")
 
 if st.session_state.at != "-":
     st.write(f"Sincronizado em: **{st.session_state.at}**")
