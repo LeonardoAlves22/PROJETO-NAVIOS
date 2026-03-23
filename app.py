@@ -101,15 +101,24 @@ def extrair_datas_prospect(corpo, envio):
             if dt != "-": res["ETA"] = dt; break
     return res
 
-# --- NOVA BUSCA A PROVA DE ERROS (POR PALAVRAS PRINCIPAIS) ---
 def verificar_correspondencia(nome_navio, assunto):
-    # Remove prefixos (MV, MT) e símbolos, fica só com as palavras
     navio_limpo = re.sub(r'[^A-Z0-9 ]', ' ', nome_navio.upper())
     palavras = [p for p in navio_limpo.split() if len(p) > 2 and p not in ["VILA", "CONDE", "ANCHO", "VESS"]]
     if not palavras: return False
-    # Verifica se a palavra principal do navio (ex: THETIS) está no assunto
-    # Usamos a última palavra do nome geralmente por ser a mais única (HORIZON THETIS -> THETIS)
     return palavras[-1] in assunto.upper()
+
+# --- FUNÇÃO PARA LIMPAR NOMES EM BELÉM ---
+def limpar_nome_belem(nome_completo):
+    # Detecta se há porto entre parênteses
+    porto = re.search(r'(\(.*?\))', nome_completo)
+    porto_str = porto.group(1) if porto else ""
+    
+    # Remove prefixos MV, MT e sufixos de viagem/voy
+    nome_limpo = re.sub(r'^(MV|M/V|MT|M/T|M\.V\.|M\.T\.)\s+', '', nome_completo.upper())
+    nome_limpo = nome_limpo.split(' - ')[0] # Remove tudo após o primeiro traço
+    nome_limpo = nome_limpo.split(' (')[0].strip() # Remove parênteses para a limpeza
+    
+    return f"{nome_limpo} {porto_str}".strip()
 
 # --- FUNÇÃO DE E-MAIL ---
 def enviar_relatorio(dados_slz, dados_bel):
@@ -145,7 +154,7 @@ c1, c2 = st.columns(2)
 with c1:
     if st.button("🔄 ATUALIZAR AGORA", use_container_width=True, type="primary"):
         try:
-            with st.status("Processando...", expanded=True) as status:
+            with st.status("Processando dados...", expanded=True) as status:
                 mail = imaplib.IMAP4_SSL("imap.gmail.com")
                 mail.login(EMAIL_USER, EMAIL_PASS)
                 agora = datetime.now(BR_TZ)
@@ -178,7 +187,7 @@ with c1:
                 clps_l = [decodificar_cabecalho(email.message_from_bytes(mail.fetch(e, '(BODY[HEADER.FIELDS (SUBJECT)])')[1][0][1]), "Subject") for e in d_c[0].split()[-50:]] if d_c[0] else []
                 mail.logout()
 
-                def processar(lista):
+                def processar(lista, is_belem=False):
                     final = []
                     for n in lista:
                         nm_lista = n.split(' - ')[0].split(' (')[0].strip().upper()
@@ -198,18 +207,26 @@ with c1:
                             except: pass
                         salvar_banco(nm_lista, eta, etb, etd, st_clp)
                         today_m = [e for e in matches if e["date"].date() == agora.date()]
-                        final.append({"Navio": n, "Prospect Manhã": "✅" if any(e["date"].hour < 13 for e in today_m) else "❌", "Prospect Tarde": "✅" if any(e["date"].hour >= 13 for e in today_m) else "❌", "ETA": eta, "ETB": etb, "ETD": etd, "CLP": st_clp})
+                        
+                        # Nome exibido: aplica limpeza extra se for Belém
+                        nome_exibido = limpar_nome_belem(n) if is_belem else n
+                        
+                        final.append({"Navio": nome_exibido, "Prospect Manhã": "✅" if any(e["date"].hour < 13 for e in today_m) else "❌", "Prospect Tarde": "✅" if any(e["date"].hour >= 13 for e in today_m) else "❌", "ETA": eta, "ETB": etb, "ETD": etd, "CLP": st_clp})
                     return final
-                st.session_state.slz = processar(slz_r); st.session_state.bel = processar(bel_r); st.session_state.at = agora.strftime("%H:%M"); st.rerun()
+                
+                st.session_state.slz = processar(slz_r, is_belem=False)
+                st.session_state.bel = processar(bel_r, is_belem=True)
+                st.session_state.at = agora.strftime("%H:%M")
+                st.rerun()
         except Exception as e: st.error(f"Erro: {e}")
 
 with c2:
     if st.button("📧 ENVIAR POR E-MAIL", use_container_width=True):
         if st.session_state.slz and enviar_relatorio(st.session_state.slz, st.session_state.bel):
             st.success("Relatório enviado!")
-        else: st.warning("Atualize os dados primeiro.")
 
 if st.session_state.at != "-":
+    st.write(f"Última atualização: **{st.session_state.at}**")
     t1, t2 = st.tabs(["📍 São Luís", "📍 Belém"])
     with t1: st.table(st.session_state.slz)
     with t2: st.table(st.session_state.bel)
