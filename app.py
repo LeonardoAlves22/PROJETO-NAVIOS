@@ -6,6 +6,7 @@ from email.mime.multipart import MIMEMultipart
 from datetime import datetime, timedelta
 from streamlit_autorefresh import st_autorefresh
 import pytz
+import os
 
 # --- CONFIGURAÇÕES ---
 EMAIL_USER = "leonardo.alves@wilsonsons.com.br"
@@ -17,14 +18,19 @@ BR_TZ = pytz.timezone('America/Sao_Paulo')
 
 st_autorefresh(interval=300000, key="auto_refresh")
 
-# --- BANCO DE DADOS ---
+# --- BANCO DE DADOS (COM AUTO-REPAIR) ---
 def init_db():
     conn = sqlite3.connect('monitor_navios.db')
     c = conn.cursor()
-    c.execute('''CREATE TABLE IF NOT EXISTS navios 
-                 (nome TEXT PRIMARY KEY, eta TEXT, etb TEXT, etd TEXT, clp TEXT, ultima_atualizacao TEXT)''')
-    try: c.execute("ALTER TABLE navios ADD COLUMN clp TEXT")
-    except: pass 
+    try:
+        # Tenta ler a tabela para ver se está ok
+        c.execute("SELECT clp FROM navios LIMIT 1")
+    except:
+        # Se der erro (coluna faltando), apaga e recria do zero
+        st.warning("Atualizando estrutura do banco de dados...")
+        c.execute("DROP TABLE IF EXISTS navios")
+        c.execute('''CREATE TABLE navios 
+                     (nome TEXT PRIMARY KEY, eta TEXT, etb TEXT, etd TEXT, clp TEXT, ultima_atualizacao TEXT)''')
     conn.commit()
     conn.close()
 
@@ -93,8 +99,6 @@ def buscar_tudo():
     try:
         mail = imaplib.IMAP4_SSL("imap.gmail.com", timeout=30)
         mail.login(EMAIL_USER, EMAIL_PASS)
-        
-        # 1. Lista Navios
         mail.select("INBOX", readonly=True)
         _, d_l = mail.search(None, '(SUBJECT "LISTA NAVIOS")')
         slz, bel = [], []
@@ -110,7 +114,6 @@ def buscar_tudo():
             slz = [l.strip() for l in pts[0].replace('SLZ:', '').split('\n') if 3 < len(l.strip()) < 60]
             if len(pts) > 1: bel = [l.strip() for l in pts[1].split('\n') if 3 < len(l.strip()) < 60]
         
-        # 2. Prospects
         mail.select(f'"{LABEL_PROSPECT}"', readonly=True)
         h_str = datetime.now(BR_TZ).strftime("%d-%b-%Y")
         _, d_p = mail.search(None, f'(SINCE "{h_str}")')
@@ -129,7 +132,6 @@ def buscar_tudo():
                     prospects.append({"subj": subj, "date": env, "datas": extrair_datas(cp_p, env)})
                 except: continue
 
-        # 3. CLP
         mail.select(f'"{LABEL_CLP}"', readonly=True)
         _, d_c = mail.search(None, "ALL")
         clps = []
@@ -172,7 +174,8 @@ st.set_page_config(page_title="Monitor WS", layout="wide")
 init_db()
 st.title("🚢 Monitor Operacional Wilson Sons")
 
-if 'dados' not in st.session_state: st.session_state.dados = {"slz": [], "bel": [], "at": "-"}
+if 'dados' not in st.session_state:
+    st.session_state.dados = {"slz": [], "bel": [], "at": "-"}
 
 c1, c2 = st.columns(2)
 with c1:
