@@ -22,26 +22,33 @@ st_autorefresh(interval=300000, key="auto_refresh")
 def init_db():
     conn = sqlite3.connect('monitor_navios.db')
     c = conn.cursor()
-    # Cria com 5 colunas de dados + timestamp
+    # Cria a tabela base
     c.execute('''CREATE TABLE IF NOT EXISTS navios 
-                 (nome TEXT PRIMARY KEY, eta TEXT, etb TEXT, etd TEXT, clp TEXT, ultima_atualizacao TEXT)''')
+                 (nome TEXT PRIMARY KEY, eta TEXT, etb TEXT, etd TEXT, ultima_atualizacao TEXT)''')
+    # Tenta adicionar a coluna clp caso ela não exista (evita o OperationalError)
+    try:
+        c.execute("ALTER TABLE navios ADD COLUMN clp TEXT")
+    except:
+        pass # Coluna já existe
     conn.commit()
     conn.close()
 
 def salvar_no_banco(nome, eta, etb, etd, clp):
     conn = sqlite3.connect('monitor_navios.db')
     c = conn.cursor()
-    c.execute("SELECT eta, etb, etd, clp FROM navios WHERE nome=?", (nome,))
-    existente = c.fetchone()
-    
-    if existente:
-        eta = eta if eta != "-" else existente[0]
-        etb = etb if etb != "-" else existente[1]
-        etd = etd if etd != "-" else existente[2]
-        clp = clp if clp != "-" else existente[3]
-
-    c.execute('''INSERT OR REPLACE INTO navios (nome, eta, etb, etd, clp, ultima_atualizacao)
-                 VALUES (?, ?, ?, ?, ?, ?)''', (nome, eta, etb, etd, clp, datetime.now(BR_TZ).strftime("%d/%m %H:%M")))
+    try:
+        c.execute("SELECT eta, etb, etd, clp FROM navios WHERE nome=?", (nome,))
+        existente = c.fetchone()
+        if existente:
+            eta = eta if eta != "-" else existente[0]
+            etb = etb if etb != "-" else existente[1]
+            etd = etd if etd != "-" else existente[2]
+            clp = clp if clp != "-" else existente[3]
+        
+        c.execute('''INSERT OR REPLACE INTO navios (nome, eta, etb, etd, clp, ultima_atualizacao)
+                     VALUES (?, ?, ?, ?, ?, ?)''', (nome, eta, etb, etd, clp, datetime.now(BR_TZ).strftime("%d/%m %H:%M")))
+    except Exception as e:
+        print(f"Erro ao salvar: {e}")
     conn.commit()
     conn.close()
 
@@ -100,80 +107,55 @@ def buscar_dados():
     try:
         mail = imaplib.IMAP4_SSL("imap.gmail.com", timeout=30)
         mail.login(EMAIL_USER, EMAIL_PASS)
-        
         mail.select("INBOX", readonly=True)
-        _, data_lista = mail.search(None, '(SUBJECT "LISTA NAVIOS")')
-        slz_bruto, bel_bruto = [], []
-        if data_lista[0]:
-            eid = data_lista[0].split()[-1]
+        _, d_l = mail.search(None, '(SUBJECT "LISTA NAVIOS")')
+        slz, bel = [], []
+        if d_l[0]:
+            eid = d_l[0].split()[-1]
             _, d = mail.fetch(eid, '(RFC822)')
             msg = email.message_from_bytes(d[0][1])
-            corpo_l = ""
+            corpo = ""
             for part in msg.walk():
                 if part.get_content_type() in ["text/plain", "text/html"]:
                     p = part.get_payload(decode=True).decode(errors="ignore")
-                    corpo_l = limpar_html(p) if part.get_content_type() == "text/html" else p
+                    corpo = limpar_html(p) if part.get_content_type() == "text/html" else p
                     break
-            partes = re.split(r'BELEM:', corpo_l, flags=re.IGNORECASE)
-            slz_bruto = [l.strip() for l in partes[0].replace('SLZ:', '').split('\n') if 3 < len(l.strip()) < 60]
+            partes = re.split(r'BELEM:', corpo, flags=re.IGNORECASE)
+            slz = [l.strip() for l in partes[0].replace('SLZ:', '').split('\n') if 3 < len(l.strip()) < 60]
             if len(partes) > 1:
-                bel_bruto = [l.strip() for l in partes[1].split('\n') if 3 < len(l.strip()) < 60]
+                bel = [l.strip() for l in partes[1].split('\n') if 3 < len(l.strip()) < 60]
 
         mail.select(f'"{LABEL_PROSPECT}"', readonly=True)
-        hoje_str = datetime.now(BR_TZ).strftime("%d-%b-%Y")
-        _, data_p = mail.search(None, f'(SINCE "{hoje_str}")')
-        prospects_list = []
-        if data_p[0]:
-            for eid in data_p[0].split()[-60:]:
+        h_str = datetime.now(BR_TZ).strftime("%d-%b-%Y")
+        _, d_p = mail.search(None, f'(SINCE "{h_str}")')
+        prospects = []
+        if d_p[0]:
+            for eid in d_p[0].split()[-60:]:
                 _, d = mail.fetch(eid, '(RFC822)')
                 m = email.message_from_bytes(d[0][1])
-                envio_br = email.utils.parsedate_to_datetime(m.get("Date")).astimezone(BR_TZ)
+                envio = email.utils.parsedate_to_datetime(m.get("Date")).astimezone(BR_TZ)
                 subj = "".join(str(c.decode(ch or 'utf-8') if isinstance(c, bytes) else c) for c, ch in decode_header(m.get("Subject", ""))).upper()
-                corpo_p = ""
+                c_p = ""
                 for part in m.walk():
                     if part.get_content_type() == "text/html":
-                        corpo_p = limpar_html(part.get_payload(decode=True).decode(errors="ignore"))
+                        c_p = limpar_html(part.get_payload(decode=True).decode(errors="ignore"))
                         break
                     elif part.get_content_type() == "text/plain":
-                        corpo_p = part.get_payload(decode=True).decode(errors="ignore")
-                prospects_list.append({"subj": subj, "date": envio_br, "datas": extrair_datas_prospect(corpo_p, envio_br)})
+                        c_p = part.get_payload(decode=True).decode(errors="ignore")
+                prospects.append({"subj": subj, "date": envio, "datas": extrair_datas_prospect(c_p, envio)})
 
         mail.select(f'"{LABEL_CLP}"', readonly=True)
-        _, data_clp = mail.search(None, "ALL")
-        clps = []
-        if data_clp[0]:
-            for eid in data_clp[0].split()[-50:]:
+        _, d_c = mail.search(None, "ALL")
+        clps_list = []
+        if d_c[0]:
+            for eid in d_c[0].split()[-50:]:
                 _, d = mail.fetch(eid, '(BODY[HEADER.FIELDS (SUBJECT)])')
                 m_c = email.message_from_bytes(d[0][1])
-                clps.append("".join(str(c.decode(ch or 'utf-8') if isinstance(c, bytes) else c) for c, ch in decode_header(m_c.get("Subject", ""))).upper())
+                clps_list.append("".join(str(c.decode(ch or 'utf-8') if isinstance(c, bytes) else c) for c, ch in decode_header(m_c.get("Subject", ""))).upper())
 
         mail.logout()
-        return slz_bruto, bel_bruto, prospects_list, clps
+        return slz, bel, prospects, clps_list
     except Exception as e: return None, None, str(e), []
-
-# --- FUNÇÃO DE E-MAIL ---
-
-def enviar_email_relatorio(dados_slz, dados_bel):
-    try:
-        msg = MIMEMultipart()
-        msg['From'] = EMAIL_USER
-        msg['To'] = DESTINATARIO
-        msg['Subject'] = f"🚢 Monitor Operacional WS - {datetime.now(BR_TZ).strftime('%d/%m %H:%M')}"
-
-        def gerar_linhas(lista):
-            h = ""
-            for r in lista:
-                c_am = "#d4edda" if r["AM"] == "✅" else "#f8d7da"
-                c_pm = "#d4edda" if r["PM"] == "✅" else "#f8d7da"
-                c_clp = "#fff3cd" if "CRÍTICO" in r["CLP"] else ("#d4edda" if "EMITIDA" in r["CLP"] else "#f8d7da")
-                h += f"<tr><td style='border:1px solid #ddd;padding:8px;'>{r['Navio']}</td><td style='background:{c_am};text-align:center;'>{r['AM']}</td><td style='background:{c_pm};text-align:center;'>{r['PM']}</td><td style='text-align:center;'>{r['ETA']}</td><td style='text-align:center;'>{r['ETB']}</td><td style='text-align:center;'>{r['ETD']}</td><td style='background:{c_clp};text-align:center;'>{r['CLP']}</td></tr>"
-            return h
-
-        corpo = f"<html><body><h2>Relatório Wilson Sons</h2><table style='border-collapse:collapse;width:100%;'><tr style='background:#004a99;color:white;'><th>Navio</th><th>AM</th><th>PM</th><th>ETA</th><th>ETB</th><th>ETD</th><th>CLP</th></tr>{gerar_linhas(dados_slz)}</table><br><h3>Belém</h3><table style='border-collapse:collapse;width:100%;'>{gerar_linhas(dados_bel)}</table></body></html>"
-        msg.attach(MIMEText(corpo, 'html'))
-        s = smtplib.SMTP('smtp.gmail.com', 587); s.starttls(); s.login(EMAIL_USER, EMAIL_PASS); s.send_message(msg); s.quit()
-        return True
-    except Exception as e: st.error(f"Erro e-mail: {e}"); return False
 
 # --- UI ---
 st.set_page_config(page_title="Monitor WS", layout="wide")
@@ -211,13 +193,6 @@ with col1:
                         res.append({"Navio": n, "AM": "✅" if any(e["date"].hour < 13 for e in match) else "❌", "PM": "✅" if any(e["date"].hour >= 13 for e in match) else "❌", "ETA": eta, "ETB": etb, "ETD": etd, "CLP": clp_st})
                     return res
                 st.session_state.dados = {"slz": montar(slz_res), "bel": montar(bel_res), "at": agora.strftime("%H:%M:%S")}
-
-with col2:
-    if st.button("📧 ENVIAR POR E-MAIL", use_container_width=True):
-        if st.session_state.dados["slz"]:
-            if enviar_email_relatorio(st.session_state.dados["slz"], st.session_state.dados["bel"]):
-                st.success("E-mail enviado!")
-        else: st.warning("Atualize primeiro.")
 
 if st.session_state.dados["at"] != "-":
     st.write(f"Última atualização: **{st.session_state.dados['at']}**")
