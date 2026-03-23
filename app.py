@@ -126,7 +126,6 @@ def extrair_datas_prospect(corpo_sujo, envio):
             if dt != "-": res["ETD" if k=="ETS" else k] = dt
     return res
 
-# --- FUNÇÃO DE ENVIO DE E-MAIL ---
 def enviar_relatorio(dados_slz, dados_bel):
     try:
         msg = MIMEMultipart()
@@ -141,22 +140,16 @@ def enviar_relatorio(dados_slz, dados_bel):
             for r in lista:
                 c_am = "background:#d4edda;" if r["Prospect Manhã"] == "✅" else "background:#f8d7da;"
                 c_pm = "background:#d4edda;" if r["Prospect Tarde"] == "✅" else "background:#f8d7da;"
-                bg_clp = "background:#d4edda;" if "EMITIDA" in r['CLP'] else ("background:#fff3cd;" if "CRÍTICO" in r['CLP'] else "background:#f8d7da;")
-                h += f"<tr style='text-align:center;'><td>{r['Navio']}</td><td style='{c_am}'>{r['Prospect Manhã']}</td><td style='{c_pm}'>{r['Prospect Tarde']}</td><td>{r['ETA']}</td><td>{r['ETB']}</td><td>{r['ETD']}</td><td style='{bg_clp}'>{r['CLP']}</td></tr>"
+                # Cores CLP: Verde (Emitida), Amarelo (Crítico), Vermelho (Pendente)
+                bg_clp = "#d4edda" if "EMITIDA" in r['CLP'] else ("#fff3cd" if "CRÍTICO" in r['CLP'] else "#f8d7da")
+                h += f"<tr style='text-align:center;'><td>{r['Navio']}</td><td style='{c_am}'>{r['Prospect Manhã']}</td><td style='{c_pm}'>{r['Prospect Tarde']}</td><td>{r['ETA']}</td><td>{r['ETB']}</td><td>{r['ETD']}</td><td style='background:{bg_clp};'>{r['CLP']}</td></tr>"
             return h + "</table><br>"
 
         corpo = f"<html><body>{gerar_html('📍 São Luís', dados_slz)}{gerar_html('📍 Belém', dados_bel)}</body></html>"
         msg.attach(MIMEText(corpo, 'html'))
-        
-        s = smtplib.SMTP('smtp.gmail.com', 587)
-        s.starttls()
-        s.login(EMAIL_USER, EMAIL_PASS)
-        s.send_message(msg)
-        s.quit()
+        s = smtplib.SMTP('smtp.gmail.com', 587); s.starttls(); s.login(EMAIL_USER, EMAIL_PASS); s.send_message(msg); s.quit()
         return True
-    except Exception as e:
-        st.error(f"Erro ao enviar e-mail: {e}")
-        return False
+    except: return False
 
 # --- INTERFACE ---
 st.title("🚢 Monitor Operacional Wilson Sons")
@@ -166,10 +159,8 @@ if 'slz' not in st.session_state: st.session_state.slz = []
 if 'bel' not in st.session_state: st.session_state.bel = []
 if 'at' not in st.session_state: st.session_state.at = "-"
 
-# Layout de Botões
-col_btn1, col_btn2 = st.columns([1, 1])
-
-with col_btn1:
+c1, c2 = st.columns(2)
+with c1:
     if st.button("🔄 ATUALIZAR AGORA", use_container_width=True, type="primary"):
         try:
             with st.status("Verificando datas e CLP...", expanded=True) as status:
@@ -223,33 +214,41 @@ with col_btn1:
                         etb = p_datas["ETB"] if p_datas["ETB"] != "-" else db[1]
                         etd = p_datas["ETD"] if p_datas["ETD"] != "-" else db[2]
                         
+                        # --- LÓGICA CLP CRÍTICO ---
                         tem_clp = any(n_id in s for s in clps_list)
-                        st_clp = "✅ EMITIDA" if tem_clp else "❌ PENDENTE"
-                        salvar_banco(n, eta, etb, etd, st_clp)
+                        if tem_clp:
+                            st_clp = "✅ EMITIDA"
+                        elif eta != "-" and "/" in eta:
+                            try:
+                                d, m, a = eta.split("/")
+                                data_eta = datetime(int(a), int(m), int(d), tzinfo=BR_TZ).replace(hour=0, minute=0, second=0, microsecond=0)
+                                data_hoje = agora.replace(hour=0, minute=0, second=0, microsecond=0)
+                                diff = (data_eta - data_hoje).days
+                                
+                                if diff <= 4:
+                                    st_clp = "⚠️ CRÍTICO"
+                                else:
+                                    st_clp = "❌ PENDENTE"
+                            except:
+                                st_clp = "❌ PENDENTE"
+                        else:
+                            st_clp = "❌ PENDENTE"
                         
+                        salvar_banco(n, eta, etb, etd, st_clp)
                         today_m = [e for e in matches if e["date"].date() == agora.date()]
-                        res.append({"Navio": limpar_visual_nome(n) if belem else n, 
-                                    "Prospect Manhã": "✅" if any(e["date"].hour < 13 for e in today_m) else "❌", 
-                                    "Prospect Tarde": "✅" if any(e["date"].hour >= 13 for e in today_m) else "❌", 
-                                    "ETA": eta, "ETB": etb, "ETD": etd, "CLP": st_clp})
+                        res.append({"Navio": limpar_visual_nome(n) if belem else n, "Prospect Manhã": "✅" if any(e["date"].hour < 13 for e in today_m) else "❌", "Prospect Tarde": "✅" if any(e["date"].hour >= 13 for e in today_m) else "❌", "ETA": eta, "ETB": etb, "ETD": etd, "CLP": st_clp})
                     return res
 
-                st.session_state.slz = processar(slz_raw, False)
-                st.session_state.bel = processar(bel_raw, True)
-                st.session_state.at = agora.strftime("%H:%M")
-                st.rerun()
+                st.session_state.slz = processar(slz_raw, False); st.session_state.bel = processar(bel_raw, True); st.session_state.at = agora.strftime("%H:%M"); st.rerun()
         except Exception as e: st.error(f"Erro: {e}")
 
-with col_btn2:
+with c2:
     if st.button("📧 ENVIAR POR E-MAIL", use_container_width=True):
         if st.session_state.slz or st.session_state.bel:
             if enviar_relatorio(st.session_state.slz, st.session_state.bel):
-                st.success("Relatório enviado com sucesso!")
-        else:
-            st.warning("Primeiro clique em 'Atualizar Agora' para carregar os dados.")
+                st.success("Relatório enviado!")
 
 if st.session_state.at != "-":
-    st.write(f"Última atualização: **{st.session_state.at}**")
     t1, t2 = st.tabs(["📍 São Luís", "📍 Belém"])
     with t1: st.table(st.session_state.slz)
     with t2: st.table(st.session_state.bel)
