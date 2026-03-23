@@ -15,9 +15,11 @@ EMAIL_USER = "leonardo.alves@wilsonsons.com.br"
 EMAIL_PASS = "nlvr vmyv cbcq oexe"
 DESTINATARIO = "leonardo.alves@wilsonsons.com.br"
 
+# Regras de Negócio
 REMETENTES_VALIDOS = ["operation.sluis", "operation.belem", "agencybrazil"]
 TERMOS_PROSPECT = ["PROSPECT", "ARRIVAL", "NOR TENDERED", "BERTHING", "BERTH", "DAILY"]
 
+# --- BANCO DE DADOS ---
 def init_db():
     try:
         conn = sqlite3.connect('monitor_navios.db', check_same_thread=False)
@@ -54,6 +56,7 @@ def salvar_banco(nome, eta, etb, etd, clp):
         conn.close()
     except: pass
 
+# --- FUNÇÕES DE APOIO ---
 def decodificar_cabecalho(msg, campo):
     try:
         val = msg.get(campo)
@@ -77,11 +80,11 @@ def extrair_corpo_email(msg):
 
 def formatar_data_br(texto, ref):
     if not texto or texto == "-": return "-"
-    meses = {'JAN':1,'FEB':2,'MAR':3,'APR':4,'MAY':5,'JUN':6,'JUL':7,'AUG':8,'SEP':9,'OCT':10,'NOV':11,'DEC':12}
+    meses_en = {'JAN':1,'FEB':2,'MAR':3,'APR':4,'MAY':5,'JUN':6,'JUL':7,'AUG':8,'SEP':9,'OCT':10,'NOV':11,'DEC':12}
     try:
         d = re.search(r'(\d{1,2})', texto)
         m = re.search(r'(JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)', texto.upper())
-        if d and m: return f"{int(d.group(1)):02d}/{meses[m.group(1)]:02d}/{ref.year}"
+        if d and m: return f"{int(d.group(1)):02d}/{meses_en[m.group(1)]:02d}/{ref.year}"
     except: pass
     return "-"
 
@@ -102,22 +105,17 @@ def extrair_datas_prospect(corpo, envio):
     return res
 
 def verificar_correspondencia(nome_navio, assunto):
+    # Inteligência de busca: quebra o nome e busca a palavra principal (ex: THETIS)
     navio_limpo = re.sub(r'[^A-Z0-9 ]', ' ', nome_navio.upper())
-    palavras = [p for p in navio_limpo.split() if len(p) > 2 and p not in ["VILA", "CONDE", "ANCHO", "VESS"]]
+    palavras = [p for p in navio_limpo.split() if len(p) > 2 and p not in ["VILA", "CONDE", "ANCHO"]]
     if not palavras: return False
     return palavras[-1] in assunto.upper()
 
-# --- FUNÇÃO PARA LIMPAR NOMES EM BELÉM ---
 def limpar_nome_belem(nome_completo):
-    # Detecta se há porto entre parênteses
     porto = re.search(r'(\(.*?\))', nome_completo)
     porto_str = porto.group(1) if porto else ""
-    
-    # Remove prefixos MV, MT e sufixos de viagem/voy
     nome_limpo = re.sub(r'^(MV|M/V|MT|M/T|M\.V\.|M\.T\.)\s+', '', nome_completo.upper())
-    nome_limpo = nome_limpo.split(' - ')[0] # Remove tudo após o primeiro traço
-    nome_limpo = nome_limpo.split(' (')[0].strip() # Remove parênteses para a limpeza
-    
+    nome_limpo = nome_limpo.split(' - ')[0].split(' (')[0].strip()
     return f"{nome_limpo} {porto_str}".strip()
 
 # --- FUNÇÃO DE E-MAIL ---
@@ -128,12 +126,13 @@ def enviar_relatorio(dados_slz, dados_bel):
         msg['To'] = DESTINATARIO
         msg['Subject'] = f"🚢 Monitor Operacional WS - {datetime.now(BR_TZ).strftime('%d/%m %H:%M')}"
         def gerar_html(titulo, lista):
-            h = f"<h3 style='font-family:Arial;'>{titulo}</h3><table border='1' style='border-collapse:collapse;width:100%;font-family:Arial;font-size:12px;'>"
-            h += "<tr style='background:#004a99;color:white;'><th>Navio</th><th>Prospect Manhã</th><th>Prospect Tarde</th><th>ETA</th><th>ETB</th><th>ETD</th><th>CLP</th></tr>"
+            h = f"<h3 style='font-family:Arial; background:#f2f2f2; padding:8px;'>{titulo}</h3>"
+            h += "<table border='1' style='border-collapse:collapse; width:100%; font-family:Arial; font-size:12px;'>"
+            h += "<tr style='background:#004a99; color:white;'><th>Navio</th><th>Prospect Manhã</th><th>Prospect Tarde</th><th>ETA</th><th>ETB</th><th>ETD</th><th>CLP</th></tr>"
             for r in lista:
                 c_am = "background:#d4edda;" if r["Prospect Manhã"] == "✅" else "background:#f8d7da;"
                 c_pm = "background:#d4edda;" if r["Prospect Tarde"] == "✅" else "background:#f8d7da;"
-                bg = "#d4edda" if "EMITIDA" in r['CLP'] else ("#fff3cd" if "CRÍTICO" in r['CLP'] else "#f8d7da")
+                bg = "#d4edda" if "EMITIDA" in r['CLP'] else ("#fff3cd;" if "CRÍTICO" in r['CLP'] else "#f8d7da")
                 h += f"<tr style='text-align:center;'><td>{r['Navio']}</td><td style='{c_am}'>{r['Prospect Manhã']}</td><td style='{c_pm}'>{r['Prospect Tarde']}</td><td>{r['ETA']}</td><td>{r['ETB']}</td><td>{r['ETD']}</td><td style='background:{bg}'>{r['CLP']}</td></tr>"
             return h + "</table><br>"
         corpo = f"<html><body>{gerar_html('📍 São Luís', dados_slz)}{gerar_html('📍 Belém', dados_bel)}</body></html>"
@@ -195,9 +194,11 @@ with c1:
                         matches.sort(key=lambda x: x["date"], reverse=True)
                         p_datas = matches[0]["datas"] if matches else {"ETA":"-","ETB":"-","ETD":"-"}
                         db = ler_banco(nm_lista)
+                        
                         eta = p_datas["ETA"] if p_datas["ETA"] != "-" else db[0]
                         etb = p_datas["ETB"] if p_datas["ETB"] != "-" else db[1]
                         etd = p_datas["ETD"] if p_datas["ETD"] != "-" else db[2]
+                        
                         tem_clp = any(verificar_correspondencia(nm_lista, s) for s in clps_l)
                         st_clp = "✅ EMITIDA" if tem_clp else "❌ PENDENTE"
                         if not tem_clp and eta != "-" and "/" in eta:
@@ -206,9 +207,8 @@ with c1:
                                 if (d_eta - agora).days <= 4: st_clp = "⚠️ CRÍTICO"
                             except: pass
                         salvar_banco(nm_lista, eta, etb, etd, st_clp)
-                        today_m = [e for e in matches if e["date"].date() == agora.date()]
                         
-                        # Nome exibido: aplica limpeza extra se for Belém
+                        today_m = [e for e in matches if e["date"].date() == agora.date()]
                         nome_exibido = limpar_nome_belem(n) if is_belem else n
                         
                         final.append({"Navio": nome_exibido, "Prospect Manhã": "✅" if any(e["date"].hour < 13 for e in today_m) else "❌", "Prospect Tarde": "✅" if any(e["date"].hour >= 13 for e in today_m) else "❌", "ETA": eta, "ETB": etb, "ETD": etd, "CLP": st_clp})
@@ -226,7 +226,7 @@ with c2:
             st.success("Relatório enviado!")
 
 if st.session_state.at != "-":
-    st.write(f"Última atualização: **{st.session_state.at}**")
+    st.write(f"Sincronizado em: **{st.session_state.at}**")
     t1, t2 = st.tabs(["📍 São Luís", "📍 Belém"])
     with t1: st.table(st.session_state.slz)
     with t2: st.table(st.session_state.bel)
