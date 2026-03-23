@@ -6,7 +6,7 @@ from email.mime.multipart import MIMEMultipart
 from datetime import datetime, timedelta, timezone
 import pytz
 
-# 1. Configuração da Página
+# 1. Configuração da Página (Primeira linha obrigatória)
 st.set_page_config(page_title="Monitor WS", layout="wide")
 BR_TZ = pytz.timezone('America/Sao_Paulo')
 
@@ -15,19 +15,22 @@ EMAIL_USER = "leonardo.alves@wilsonsons.com.br"
 EMAIL_PASS = "nlvr vmyv cbcq oexe"
 DESTINATARIO = "leonardo.alves@wilsonsons.com.br"
 
-# --- BANCO DE DADOS ---
+# --- BANCO DE DADOS (COM AUTO-REPARO) ---
 def init_db():
     try:
         conn = sqlite3.connect('monitor_navios.db', check_same_thread=False)
         c = conn.cursor()
         c.execute('''CREATE TABLE IF NOT EXISTS navios 
                      (nome TEXT PRIMARY KEY, eta TEXT, etb TEXT, etd TEXT, clp TEXT, atualizacao TEXT)''')
-        # Garante que a coluna CLP existe para evitar erros de leitura
-        try: c.execute("ALTER TABLE navios ADD COLUMN clp TEXT")
-        except: pass
+        # Garante que a coluna clp existe para evitar OperationalError
+        try:
+            c.execute("SELECT clp FROM navios LIMIT 1")
+        except:
+            c.execute("ALTER TABLE navios ADD COLUMN clp TEXT")
         conn.commit()
         conn.close()
-    except: pass
+    except Exception as e:
+        st.error(f"Erro no Banco: {e}")
 
 def ler_banco(nome):
     try:
@@ -37,14 +40,15 @@ def ler_banco(nome):
         res = c.fetchone()
         conn.close()
         return res if res else ("-", "-", "-", "❌ PENDENTE")
-    except: return ("-", "-", "-", "❌ PENDENTE")
+    except:
+        return ("-", "-", "-", "❌ PENDENTE")
 
 def salvar_banco(nome, eta, etb, etd, clp):
     try:
         conn = sqlite3.connect('monitor_navios.db', check_same_thread=False)
         c = conn.cursor()
         ex = ler_banco(nome)
-        # Lógica de persistência: só substitui o dado se o novo não for vazio
+        # Preserva dados antigos caso a nova leitura venha vazia
         eta_f = eta if eta != "-" else ex[0]
         etb_f = etb if etb != "-" else ex[1]
         etd_f = etd if etd != "-" else ex[2]
@@ -53,7 +57,8 @@ def salvar_banco(nome, eta, etb, etd, clp):
                   (nome, eta_f, etb_f, etd_f, clp, datetime.now(BR_TZ).strftime("%H:%M")))
         conn.commit()
         conn.close()
-    except: pass
+    except:
+        pass
 
 # --- FUNÇÕES DE APOIO ---
 def decodificar_cabecalho(msg, campo):
@@ -63,57 +68,52 @@ def decodificar_cabecalho(msg, campo):
         partes = decode_header(val)
         res = ""
         for t, c in partes:
-            if isinstance(t, bytes): res += t.decode(c or 'utf-8', errors='ignore')
-            else: res += str(t)
+            if isinstance(t, bytes):
+                res += t.decode(c or 'utf-8', errors='ignore')
+            else:
+                res += str(t)
         return res.upper().strip()
-    except: return str(msg.get(campo) or "").upper().strip()
+    except:
+        return str(msg.get(campo) or "").upper().strip()
 
 def extrair_corpo_email(msg):
-    corpo = ""
-    if msg.is_multipart():
-        for parte in msg.walk():
-            if parte.get_content_type() == 'text/plain':
-                corpo = parte.get_payload(decode=True).decode(errors='ignore')
-                break
-            elif parte.get_content_type() == 'text/html' and not corpo:
-                corpo = parte.get_payload(decode=True).decode(errors='ignore')
-    else:
-        corpo = msg.get_payload(decode=True).decode(errors='ignore')
-    return corpo
-
-def formatar_data_br(texto_data, data_referencia):
-    if not texto_data or texto_data == "-": return "-"
-    meses_en = {'JAN': 1, 'FEB': 2, 'MAR': 3, 'APR': 4, 'MAY': 5, 'JUN': 6,
-                'JUL': 7, 'AUG': 8, 'SEP': 9, 'OCT': 10, 'NOV': 11, 'DEC': 12}
     try:
-        dia_match = re.search(r'(\d{1,2})', texto_data)
-        mes_match = re.search(r'(JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)', texto_data.upper())
-        if dia_match and mes_match:
-            dia, mes = int(dia_match.group(1)), meses_en[mes_match.group(1)]
-            return f"{dia:02d}/{mes:02d}/{data_referencia.year}"
+        if msg.is_multipart():
+            for parte in msg.walk():
+                if parte.get_content_type() == 'text/plain':
+                    return parte.get_payload(decode=True).decode(errors='ignore')
+        return msg.get_payload(decode=True).decode(errors='ignore')
+    except:
+        return ""
+
+def formatar_data_br(texto, ref):
+    if not texto or texto == "-": return "-"
+    meses = {'JAN':1,'FEB':2,'MAR':3,'APR':4,'MAY':5,'JUN':6,'JUL':7,'AUG':8,'SEP':9,'OCT':10,'NOV':11,'DEC':12}
+    try:
+        d = re.search(r'(\d{1,2})', texto)
+        m = re.search(r'(JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)', texto.upper())
+        if d and m:
+            return f"{int(d.group(1)):02d}/{meses[m.group(1)]:02d}/{ref.year}"
     except: pass
     return "-"
 
-def extrair_datas_prospect(corpo, data_email):
+def extrair_datas_prospect(corpo, envio):
     res = {"ETA": "-", "ETB": "-", "ETD": "-"}
     if not corpo: return res
-    # Limpa tags HTML para evitar interferência na Regex
     txt = re.sub(r'<[^>]+>', ' ', corpo.upper().split("LINEUP DETAILS")[0])
-    
     for k in ["ETB", "ETD", "ETS"]:
         m = re.search(rf"{k}\s+.*?([A-Z]{{3,}}\s+\d{{1,2}})", txt)
         if m:
-            dt = formatar_data_br(m.group(1).strip(), data_email)
-            if dt: res["ETD" if k == "ETS" else k] = dt
-            
+            dt = formatar_data_br(m.group(1).strip(), envio)
+            if dt != "-": res["ETD" if k == "ETS" else k] = dt
     for g in ["ARRIVAL AT ROADS", "NOTICE OF READINESS", "ETA"]:
         m = re.search(rf"{g}\s+.*?([A-Z]{{3,}}\s+\d{{1,2}})", txt)
         if m:
-            dt = formatar_data_br(m.group(1).strip(), data_email)
-            if dt: res["ETA"] = dt; break
+            dt = formatar_data_br(m.group(1).strip(), envio)
+            if dt != "-": res["ETA"] = dt; break
     return res
 
-# --- FUNÇÃO DE E-MAIL ---
+# --- RELATÓRIO E-MAIL ---
 def enviar_relatorio(dados_slz, dados_bel):
     try:
         msg = MIMEMultipart()
@@ -142,15 +142,15 @@ def enviar_relatorio(dados_slz, dados_bel):
 st.title("🚢 Monitor Operacional Wilson Sons")
 init_db()
 
-if 'slz' not in st.session_state: st.session_state.slz = []
-if 'bel' not in st.session_state: st.session_state.bel = []
-if 'at' not in st.session_state: st.session_state.at = "-"
+if 'v_slz' not in st.session_state: st.session_state.v_slz = []
+if 'v_bel' not in st.session_state: st.session_state.v_bel = []
+if 'at_info' not in st.session_state: st.session_state.at_info = "-"
 
 c1, c2 = st.columns(2)
 with c1:
     if st.button("🔄 ATUALIZAR AGORA", use_container_width=True, type="primary"):
         try:
-            with st.status("Sincronizando dados...", expanded=True) as status:
+            with st.status("Sincronizando...", expanded=True) as status:
                 mail = imaplib.IMAP4_SSL("imap.gmail.com")
                 mail.login(EMAIL_USER, EMAIL_PASS)
                 agora = datetime.now(BR_TZ)
@@ -158,16 +158,15 @@ with c1:
                 # 1. LISTA NAVIOS
                 mail.select("INBOX", readonly=True)
                 _, d_l = mail.search(None, '(SUBJECT "LISTA NAVIOS")')
-                slz_raw, bel_raw = [], []
+                slz_r, bel_r = [], []
                 if d_l[0]:
                     _, d = mail.fetch(d_l[0].split()[-1], '(RFC822)')
-                    conteudo = extrair_corpo_email(email.message_from_bytes(d[0][1]))
-                    conteudo_limpo = re.sub(r'<[^>]+>', ' ', conteudo)
-                    pts = re.split(r'BELEM:', conteudo_limpo, flags=re.IGNORECASE)
-                    slz_raw = [l.strip() for l in pts[0].replace('SLZ:', '').split('\n') if len(l.strip()) > 5]
-                    if len(pts) > 1: bel_raw = [l.strip() for l in pts[1].split('\n') if len(l.strip()) > 5]
+                    raw = extrair_corpo_email(email.message_from_bytes(d[0][1]))
+                    pts = re.split(r'BELEM:', raw, flags=re.IGNORECASE)
+                    slz_r = [l.strip() for l in pts[0].replace('SLZ:', '').split('\n') if len(l.strip()) > 5]
+                    if len(pts) > 1: bel_r = [l.strip() for l in pts[1].split('\n') if len(l.strip()) > 5]
 
-                # 2. PROSPECTS (Busca estendida de 2 dias para garantir captura)
+                # 2. PROSPECTS (Últimos 2 dias)
                 mail.select("PROSPECT", readonly=True)
                 data_busca = (agora - timedelta(days=2)).strftime("%d-%b-%Y")
                 _, d_p = mail.search(None, f'(SINCE "{data_busca}")')
@@ -176,10 +175,11 @@ with c1:
                     for eid in d_p[0].split()[-60:]:
                         _, d = mail.fetch(eid, '(RFC822)')
                         m = email.message_from_bytes(d[0][1])
+                        subj = decodificar_cabecalho(m, "Subject")
                         envio = email.utils.parsedate_to_datetime(m.get("Date")).astimezone(BR_TZ)
                         prospy.append({
-                            "subj": decodificar_cabecalho(m, "Subject"), 
-                            "date": envio, 
+                            "subj": subj, "date": envio, 
+                            "is_prospect": "PROSPECT" in subj, 
                             "datas": extrair_datas_prospect(extrair_corpo_email(m), envio)
                         })
 
@@ -193,13 +193,15 @@ with c1:
                 def processar(lista):
                     final = []
                     for n in lista:
-                        # Limpeza para busca flexível (ex: DEVBULK CANSEN)
                         nm_l = re.sub(r'^(MV|M/V|MT|M/T)\s+', '', n.strip(), flags=re.IGNORECASE).split(' - ')[0].split(' (')[0].strip().upper()
                         
-                        # Acha todos os e-mails que CONTÉM o nome do navio no assunto
-                        matches = [e for e in prospy if nm_l in e["subj"]]
-                        matches.sort(key=lambda x: x["date"], reverse=True)
-                        prospect_datas = matches[0]["datas"] if matches else {"ETA": "-", "ETB": "-", "ETD": "-"}
+                        # Filtro de Prospects: deve conter o nome do navio no assunto
+                        all_matches = [e for e in prospy if nm_l in e["subj"]]
+                        all_matches.sort(key=lambda x: x["date"], reverse=True)
+                        prospect_datas = all_matches[0]["datas"] if all_matches else {"ETA": "-", "ETB": "-", "ETD": "-"}
+                        
+                        # Marcar ✅ apenas para PROSPECTS de HOJE
+                        today_prospects = [e for e in all_matches if e["date"].date() == agora.date() and e["is_prospect"]]
                         
                         db = ler_banco(nm_l)
                         eta = prospect_datas["ETA"] if prospect_datas["ETA"] != "-" else db[0]
@@ -218,22 +220,25 @@ with c1:
                         salvar_banco(nm_l, eta, etb, etd, st_clp)
                         final.append({
                             "Navio": n, 
-                            "Prospect Manhã": "✅" if any(e["date"].hour < 13 for e in matches) else "❌", 
-                            "Prospect Tarde": "✅" if any(e["date"].hour >= 13 for e in matches) else "❌", 
+                            "Prospect Manhã": "✅" if any(e["date"].hour < 13 for e in today_prospects) else "❌", 
+                            "Prospect Tarde": "✅" if any(e["date"].hour >= 13 for e in today_prospects) else "❌", 
                             "ETA": eta, "ETB": etb, "ETD": etd, "CLP": st_clp
                         })
                     return final
 
-                st.session_state.slz = processar(slz_raw); st.session_state.bel = processar(bel_raw); st.session_state.at = agora.strftime("%H:%M"); st.rerun()
+                st.session_state.v_slz = processar(slz_r)
+                st.session_state.v_bel = processar(bel_r)
+                st.session_state.at_info = agora.strftime("%H:%M")
+                st.rerun()
         except Exception as e: st.error(f"Erro: {e}")
 
 with c2:
     if st.button("📧 ENVIAR POR E-MAIL", use_container_width=True):
-        if st.session_state.slz and enviar_relatorio(st.session_state.slz, st.session_state.bel):
+        if st.session_state.v_slz and enviar_relatorio(st.session_state.v_slz, st.session_state.v_bel):
             st.success("Relatório enviado!")
 
-if st.session_state.at != "-":
-    st.write(f"Sincronizado em: **{st.session_state.at}**")
+if st.session_state.at_info != "-":
+    st.write(f"Sincronizado em: **{st.session_state.at_info}**")
     t1, t2 = st.tabs(["📍 São Luís", "📍 Belém"])
-    with t1: st.table(st.session_state.slz)
-    with t2: st.table(st.session_state.bel)
+    with t1: st.table(st.session_state.v_slz)
+    with t2: st.table(st.session_state.v_bel)
