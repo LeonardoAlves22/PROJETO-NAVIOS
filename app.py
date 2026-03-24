@@ -376,7 +376,7 @@ with c1:
 
                 if d_p[0]:
 
-                    for eid in d_p[0].split()[-40:]:
+                    for eid in d_p[0].split()[-80:]:
 
                         _, d = mail.fetch(eid, '(RFC822)')
 
