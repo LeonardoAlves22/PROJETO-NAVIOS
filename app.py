@@ -220,4 +220,27 @@ with c1:
                             except: pass
                         
                         salvar_banco(n, eta, etb, etd, st_clp)
-                        res.append({"Navio": n_id if belem else n, "Prospect Manhã": "✅" if any(e["date"].hour < 13 and e["date"].date() == agora.date() for e in matches) else "❌", "Prospect Tarde": "✅" if any(e["date"].hour >= 13 and e["date"].date() == agora.date() for e in matches) else "❌", "ETA": eta, "ETB": et
+                        res.append({"Navio": n_id if belem else n, "Prospect Manhã": "✅" if any(e["date"].hour < 13 and e["date"].date() == agora.date() for e in matches) else "❌", "Prospect Tarde": "✅" if any(e["date"].hour >= 13 and e["date"].date() == agora.date() for e in matches) else "❌", "ETA": eta, "ETB": etb, "ETD": etd, "CLP": st_clp})
+                    return res
+
+                st.session_state.slz = processar(slz_raw, False)
+                st.session_state.bel = processar(bel_raw, True)
+                st.session_state.at = agora.strftime("%H:%M")
+                progresso.progress(100)
+                status_txt.success("Sincronização concluída!")
+                time.sleep(1)
+                st.rerun()
+
+        except Exception as e: st.error(f"Erro: {e}")
+
+with c2:
+    if st.button("📧 ENVIAR POR E-MAIL", use_container_width=True):
+        if st.session_state.slz or st.session_state.bel:
+            if enviar_relatorio(st.session_state.slz, st.session_state.bel):
+                st.success("Relatório enviado!")
+
+if st.session_state.at != "-":
+    st.write(f"⏱️ Última atualização: {st.session_state.at}")
+    t1, t2 = st.tabs(["📍 São Luís", "📍 Belém"])
+    with t1: st.table(st.session_state.slz)
+    with t2: st.table(st.session_state.bel)
