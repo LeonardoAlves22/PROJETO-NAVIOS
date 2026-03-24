@@ -147,4 +147,77 @@ with c1:
                 if d_l[0]:
                     _, d = mail.fetch(d_l[0].split()[-1], '(BODY.PEEK[TEXT])')
                     corpo_lista = decodificar_texto(d[0][1])
-                    linhas = [l
+                    linhas = [l.strip() for l in corpo_lista.split('\n') if len(l.strip()) > 1]
+                    secao = None
+                    for linha in linhas:
+                        l_up = linha.upper()
+                        if "SLZ" in l_up: secao = "SLZ"; continue
+                        if "BELEM" in l_up: secao = "BEL"; continue
+                        if secao and len(l_up) > 3:
+                            if secao == "SLZ": slz_raw.append(linha.strip())
+                            else: bel_raw.append(linha.strip())
+                progresso.progress(25)
+
+                # 2. PROSPECTS (LIMITE 40)
+                mail.select("PROSPECT", readonly=True)
+                _, d_p = mail.search(None, "ALL")
+                prospy = []
+                if d_p[0]:
+                    lista_ids = d_p[0].split()[-40:] # LIMITADO A 40
+                    total = len(lista_ids)
+                    for i, eid in enumerate(lista_ids):
+                        status_txt.info(f"Processando Prospect {i+1} de {total}...")
+                        progresso.progress(25 + int((i/total)*40))
+                        
+                        # Otimizado: PEEK evita marcar como lido e baixa apenas o essencial
+                        _, data = mail.fetch(eid, '(BODY.PEEK[HEADER.FIELDS (Subject Date)] BODY.PEEK[TEXT])')
+                        head = email.message_from_bytes(data[0][1])
+                        body = decodificar_texto(data[1][1])
+                        subj = decodificar_assunto(head)
+                        
+                        if any(term in subj for term in TERMOS_PROSPECT):
+                            envio = email.utils.parsedate_to_datetime(head.get("Date")).astimezone(BR_TZ)
+                            prospy.append({"subj": subj, "date": envio, "datas": extrair_datas_prospect(body, envio)})
+                progresso.progress(65)
+
+                # 3. CLP (LIMITE 40)
+                status_txt.info("Verificando Marcador CLP...")
+                mail.select("CLP", readonly=True)
+                _, d_c = mail.search(None, "ALL")
+                clps_list = []
+                if d_c[0]:
+                    lista_ids_c = d_c[0].split()[-40:]
+                    total_c = len(lista_ids_c)
+                    for i, e in enumerate(lista_ids_c):
+                        status_txt.info(f"Checando CLP {i+1} de {total_c}...")
+                        progresso.progress(65 + int((i/total_c)*25))
+                        _, d = mail.fetch(e, '(BODY.PEEK[HEADER.FIELDS (SUBJECT)])')
+                        clps_list.append(decodificar_assunto(email.message_from_bytes(d[0][1])))
+                
+                mail.logout()
+                progresso.progress(90)
+
+                # 4. PROCESSAMENTO FINAL
+                status_txt.info("Finalizando cálculos e salvando banco...")
+                def processar(lista, belem=False):
+                    res = []
+                    for n in lista:
+                        n_id = re.sub(r'^(MV|M/V|MT|M/T)\s+', '', n.upper()).split(' - ')[0].strip()
+                        matches = sorted([e for e in prospy if n_id in e["subj"]], key=lambda x: x["date"], reverse=True)
+                        p_datas = matches[0]["datas"] if matches else {"ETA":"-","ETB":"-","ETD":"-"}
+                        db = ler_banco(n)
+                        
+                        eta = p_datas["ETA"] if p_datas["ETA"] != "-" else db[0]
+                        etb = p_datas["ETB"] if p_datas["ETB"] != "-" else db[1]
+                        etd = p_datas["ETD"] if p_datas["ETD"] != "-" else db[2]
+                        
+                        st_clp = "✅ EMITIDA" if any(n_id in s for s in clps_list) else db[3]
+                        if st_clp != "✅ EMITIDA" and eta != "-" and "/" in eta:
+                            try:
+                                d, m, a = eta.split("/")
+                                diff = (datetime(int(a), int(m), int(d)).date() - agora.date()).days
+                                if diff <= 4: st_clp = "⚠️ CRÍTICO"
+                            except: pass
+                        
+                        salvar_banco(n, eta, etb, etd, st_clp)
+                        res.append({"Navio": n_id if belem else n, "Prospect Manhã": "✅" if any(e["date"].hour < 13 and e["date"].date() == agora.date() for e in matches) else "❌", "Prospect Tarde": "✅" if any(e["date"].hour >= 13 and e["date"].date() == agora.date() for e in matches) else "❌", "ETA": eta, "ETB": et
