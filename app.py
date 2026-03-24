@@ -97,57 +97,65 @@ c1, c2 = st.columns(2)
 with c1:
     if st.button("🔄 ATUALIZAR AGORA", use_container_width=True, type="primary"):
         try:
-            with st.status("🔍 Conectando...", expanded=True):
+            with st.status("🔍 Sincronizando (Filtro Python)...", expanded=True):
                 mail = imaplib.IMAP4_SSL("imap.gmail.com")
                 mail.login(EMAIL_USER, EMAIL_PASS)
-                hoje_br = datetime.now(BR_TZ)
+                hoje_br = datetime.now(BR_TZ).date()
                 
-                # DATA NO FORMATO IMAP PADRÃO: 23-Mar-2026
-                d_imap = hoje_br.strftime("%d-%b-%Y")
-
-                # 1. LISTA NAVIOS (INBOX)
+                # 1. LISTA NAVIOS (Pega os últimos 10 e-mails do INBOX)
                 mail.select("INBOX", readonly=True)
-                # Tentativa de busca sem o filtro SINCE se ele falhar, ou usando formato estrito
-                status_l, d_l = mail.search(None, 'SINCE', d_imap, 'SUBJECT', '"LISTA NAVIOS"')
-                
+                _, data_l = mail.search(None, 'ALL')
+                ids_l = data_l[0].split()
                 slz_raw, bel_raw = [], []
-                if status_l == 'OK' and d_l[0]:
-                    _, d = mail.fetch(d_l[0].split()[-1], '(BODY.PEEK[TEXT])')
-                    corpo = decodificar_texto_limpo(d[0][1])
-                    secao, vistos = None, set()
-                    for linha in corpo.split('\n'):
-                        l = linha.strip()
-                        if not l: continue
-                        if "SLZ" in l.upper(): secao = "SLZ"; continue
-                        if "BELEM" in l.upper(): secao = "BEL"; continue
-                        if secao and len(l) > 3 and l.upper() not in vistos:
-                            if secao == "SLZ": slz_raw.append(l)
-                            else: bel_raw.append(l)
-                            vistos.add(l.upper())
+                
+                for eid in reversed(ids_l[-10:]): # Olha os últimos 10
+                    _, d = mail.fetch(eid, '(BODY.PEEK[HEADER.FIELDS (Subject Date)] BODY.PEEK[TEXT])')
+                    msg_h = email.message_from_bytes(d[0][1])
+                    assunto = decodificar_assunto(msg_h.get("Subject"))
+                    data_envio = email.utils.parsedate_to_datetime(msg_h.get("Date")).astimezone(BR_TZ).date()
+                    
+                    if "LISTA NAVIOS" in assunto and data_envio == hoje_br:
+                        corpo = decodificar_texto_limpo(d[1][1])
+                        secao, vistos = None, set()
+                        for linha in corpo.split('\n'):
+                            l = linha.strip()
+                            if "SLZ" in l.upper(): secao = "SLZ"; continue
+                            if "BELEM" in l.upper(): secao = "BEL"; continue
+                            if secao and len(l) > 3 and l.upper() not in vistos:
+                                if secao == "SLZ": slz_raw.append(l)
+                                else: bel_raw.append(l)
+                                vistos.add(l.upper())
+                        break # Achou a lista de hoje, para de buscar
 
-                # 2. PROSPECTS
+                # 2. PROSPECTS (Pega os últimos 100 da pasta PROSPECT)
                 mail.select("PROSPECT", readonly=True)
-                status_p, d_p = mail.search(None, 'SINCE', d_imap)
+                _, data_p = mail.search(None, 'ALL')
+                ids_p = data_p[0].split()
                 prospy = []
-                if status_p == 'OK' and d_p[0]:
-                    for eid in d_p[0].split():
-                        _, d = mail.fetch(eid, '(BODY.PEEK[HEADER.FIELDS (Subject Date)] BODY.PEEK[TEXT])')
-                        m_head = email.message_from_bytes(d[0][1])
-                        envio = email.utils.parsedate_to_datetime(m_head.get("Date")).astimezone(BR_TZ)
-                        if envio.date() == hoje_br.date():
-                            subj = decodificar_assunto(m_head.get("Subject"))
-                            if any(t in subj for t in TERMOS_PROSPECT):
-                                corpo_txt = d[1][1].decode(errors='ignore') if len(d)>1 else ""
-                                prospy.append({"subj": subj, "date": envio, "datas": extrair_datas_prospect(corpo_txt, envio)})
+                
+                for eid in ids_p[-100:]: # Olha os últimos 100
+                    _, d = mail.fetch(eid, '(BODY.PEEK[HEADER.FIELDS (Subject Date)] BODY.PEEK[TEXT])')
+                    msg_h = email.message_from_bytes(d[0][1])
+                    data_envio = email.utils.parsedate_to_datetime(msg_h.get("Date")).astimezone(BR_TZ)
+                    
+                    if data_envio.date() == hoje_br:
+                        subj = decodificar_assunto(msg_h.get("Subject"))
+                        if any(t in subj for t in TERMOS_PROSPECT):
+                            corpo_txt = d[1][1].decode(errors='ignore') if len(d)>1 else ""
+                            prospy.append({"subj": subj, "date": data_envio, "datas": extrair_datas_prospect(corpo_txt, data_envio)})
 
-                # 3. CLP
+                # 3. CLP (Pega os últimos 50 da pasta CLP)
                 mail.select("CLP", readonly=True)
-                status_c, d_c = mail.search(None, 'SINCE', d_imap)
+                _, data_c = mail.search(None, 'ALL')
+                ids_c = data_c[0].split()
                 clps_hoje = []
-                if status_c == 'OK' and d_c[0]:
-                    for e in d_c[0].split():
-                        _, d = mail.fetch(e, '(BODY.PEEK[HEADER.FIELDS (SUBJECT)])')
-                        clps_hoje.append(decodificar_assunto(email.message_from_bytes(d[0][1]).get("Subject")))
+                
+                for eid in ids_c[-50:]:
+                    _, d = mail.fetch(eid, '(BODY.PEEK[HEADER.FIELDS (Subject Date)])')
+                    msg_h = email.message_from_bytes(d[0][1])
+                    data_envio = email.utils.parsedate_to_datetime(msg_h.get("Date")).astimezone(BR_TZ).date()
+                    if data_envio == hoje_br:
+                        clps_hoje.append(decodificar_assunto(msg_h.get("Subject")))
 
                 mail.logout()
 
@@ -159,6 +167,7 @@ with c1:
                         matches.sort(key=lambda x: x["date"], reverse=True)
                         p_datas = matches[0]["datas"] if matches else {"ETA":"-","ETB":"-","ETD":"-"}
                         db = ler_banco(n)
+                        
                         eta = p_datas["ETA"] if p_datas["ETA"] != "-" else db[0]
                         etb = p_datas["ETB"] if p_datas["ETB"] != "-" else db[1]
                         etd = p_datas["ETD"] if p_datas["ETD"] != "-" else db[2]
@@ -175,7 +184,7 @@ with c1:
 
                 st.session_state.slz = processar(slz_raw, False)
                 st.session_state.bel = processar(bel_raw, True)
-                st.session_state.at = hoje_br.strftime("%H:%M")
+                st.session_state.at = datetime.now(BR_TZ).strftime("%H:%M")
                 st.rerun()
         except Exception as e: st.error(f"Erro: {e}")
 
