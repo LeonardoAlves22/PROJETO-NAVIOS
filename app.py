@@ -51,7 +51,7 @@ def salvar_banco(nome_id, eta, etb, etd, clp):
         conn.close()
     except: pass
 
-# --- APOIO ---
+# --- FUNÇÕES DE APOIO ---
 def decodificar_texto_limpo(payload):
     if not payload: return ""
     txt = payload.decode(errors='ignore') if isinstance(payload, bytes) else str(payload)
@@ -85,6 +85,27 @@ def extrair_datas_prospect(texto_puro, envio):
         if m: res[k] = parse_data(m.group(1))
     return res
 
+def enviar_relatorio(dados_slz, dados_bel):
+    try:
+        msg = MIMEMultipart()
+        msg['From'] = EMAIL_USER
+        msg['To'] = DESTINATARIO
+        msg['Subject'] = f"🚢 Relatório Monitor WS - {datetime.now(BR_TZ).strftime('%d/%m %H:%M')}"
+        
+        def gerar_tabela(titulo, lista):
+            html = f"<h3>{titulo}</h3><table border='1' style='border-collapse:collapse; width:100%; font-family:Arial;'>"
+            html += "<tr style='background:#eee;'><th>Navio</th><th>Manhã</th><th>Tarde</th><th>ETA</th><th>ETB</th><th>ETD</th><th>CLP</th></tr>"
+            for r in lista:
+                html += f"<tr><td>{r['Navio']}</td><td align='center'>{r['Prospect Manhã']}</td><td align='center'>{r['Prospect Tarde']}</td><td>{r['ETA']}</td><td>{r['ETB']}</td><td>{r['ETD']}</td><td>{r['CLP']}</td></tr>"
+            return html + "</table>"
+            
+        corpo = f"<html><body>{gerar_tabela('São Luís', dados_slz)}{gerar_tabela('Belém', dados_bel)}</body></html>"
+        msg.attach(MIMEText(corpo, 'html'))
+        with smtplib.SMTP('smtp.gmail.com', 587) as s:
+            s.starttls(); s.login(EMAIL_USER, EMAIL_PASS); s.send_message(msg)
+        return True
+    except: return False
+
 # --- INTERFACE ---
 st.title("🚢 Monitor Operacional Wilson Sons")
 init_db()
@@ -97,24 +118,21 @@ c1, c2 = st.columns(2)
 with c1:
     if st.button("🔄 ATUALIZAR AGORA", use_container_width=True, type="primary"):
         try:
-            with st.status("🔍 Sincronizando (Filtro Python)...", expanded=True):
+            with st.status("🔍 Buscando Marcadores...", expanded=True):
                 mail = imaplib.IMAP4_SSL("imap.gmail.com")
                 mail.login(EMAIL_USER, EMAIL_PASS)
                 hoje_br = datetime.now(BR_TZ).date()
-                
-                # 1. LISTA NAVIOS (Pega os últimos 10 e-mails do INBOX)
+
+                # 1. LISTA NAVIOS (INBOX)
                 mail.select("INBOX", readonly=True)
-                _, data_l = mail.search(None, 'ALL')
-                ids_l = data_l[0].split()
+                _, msg_count = mail.select("INBOX", readonly=True)
+                total = int(msg_count[0])
                 slz_raw, bel_raw = [], []
-                
-                for eid in reversed(ids_l[-10:]): # Olha os últimos 10
-                    _, d = mail.fetch(eid, '(BODY.PEEK[HEADER.FIELDS (Subject Date)] BODY.PEEK[TEXT])')
+                # Busca nas últimas 15 mensagens da Caixa de Entrada
+                for i in range(total, max(0, total-15), -1):
+                    _, d = mail.fetch(str(i), '(BODY.PEEK[HEADER.FIELDS (Subject Date)] BODY.PEEK[TEXT])')
                     msg_h = email.message_from_bytes(d[0][1])
-                    assunto = decodificar_assunto(msg_h.get("Subject"))
-                    data_envio = email.utils.parsedate_to_datetime(msg_h.get("Date")).astimezone(BR_TZ).date()
-                    
-                    if "LISTA NAVIOS" in assunto and data_envio == hoje_br:
+                    if "LISTA NAVIOS" in decodificar_assunto(msg_h.get("Subject")):
                         corpo = decodificar_texto_limpo(d[1][1])
                         secao, vistos = None, set()
                         for linha in corpo.split('\n'):
@@ -125,37 +143,35 @@ with c1:
                                 if secao == "SLZ": slz_raw.append(l)
                                 else: bel_raw.append(l)
                                 vistos.add(l.upper())
-                        break # Achou a lista de hoje, para de buscar
+                        break
 
-                # 2. PROSPECTS (Pega os últimos 100 da pasta PROSPECT)
-                mail.select("PROSPECT", readonly=True)
-                _, data_p = mail.search(None, 'ALL')
-                ids_p = data_p[0].split()
+                # 2. PROSPECTS (DIRETO NO MARCADOR PROSPECT)
                 prospy = []
-                
-                for eid in ids_p[-100:]: # Olha os últimos 100
-                    _, d = mail.fetch(eid, '(BODY.PEEK[HEADER.FIELDS (Subject Date)] BODY.PEEK[TEXT])')
-                    msg_h = email.message_from_bytes(d[0][1])
-                    data_envio = email.utils.parsedate_to_datetime(msg_h.get("Date")).astimezone(BR_TZ)
-                    
-                    if data_envio.date() == hoje_br:
-                        subj = decodificar_assunto(msg_h.get("Subject"))
-                        if any(t in subj for t in TERMOS_PROSPECT):
-                            corpo_txt = d[1][1].decode(errors='ignore') if len(d)>1 else ""
-                            prospy.append({"subj": subj, "date": data_envio, "datas": extrair_datas_prospect(corpo_txt, data_envio)})
+                status_p, count_p = mail.select("PROSPECT", readonly=True)
+                if status_p == 'OK':
+                    total_p = int(count_p[0])
+                    # Verifica os últimos 50 e-mails do marcador
+                    for i in range(total_p, max(0, total_p-50), -1):
+                        _, d = mail.fetch(str(i), '(BODY.PEEK[HEADER.FIELDS (Subject Date)] BODY.PEEK[TEXT])')
+                        msg_h = email.message_from_bytes(d[0][1])
+                        data_envio = email.utils.parsedate_to_datetime(msg_h.get("Date")).astimezone(BR_TZ)
+                        if data_envio.date() == hoje_br:
+                            subj = decodificar_assunto(msg_h.get("Subject"))
+                            if any(t in subj for t in TERMOS_PROSPECT):
+                                corpo_txt = d[1][1].decode(errors='ignore') if len(d)>1 else ""
+                                prospy.append({"subj": subj, "date": data_envio, "datas": extrair_datas_prospect(corpo_txt, data_envio)})
 
-                # 3. CLP (Pega os últimos 50 da pasta CLP)
-                mail.select("CLP", readonly=True)
-                _, data_c = mail.search(None, 'ALL')
-                ids_c = data_c[0].split()
+                # 3. CLP (DIRETO NO MARCADOR CLP)
                 clps_hoje = []
-                
-                for eid in ids_c[-50:]:
-                    _, d = mail.fetch(eid, '(BODY.PEEK[HEADER.FIELDS (Subject Date)])')
-                    msg_h = email.message_from_bytes(d[0][1])
-                    data_envio = email.utils.parsedate_to_datetime(msg_h.get("Date")).astimezone(BR_TZ).date()
-                    if data_envio == hoje_br:
-                        clps_hoje.append(decodificar_assunto(msg_h.get("Subject")))
+                status_c, count_c = mail.select("CLP", readonly=True)
+                if status_c == 'OK':
+                    total_c = int(count_c[0])
+                    for i in range(total_c, max(0, total_c-30), -1):
+                        _, d = mail.fetch(str(i), '(BODY.PEEK[HEADER.FIELDS (Subject Date)])')
+                        msg_h = email.message_from_bytes(d[0][1])
+                        data_envio = email.utils.parsedate_to_datetime(msg_h.get("Date")).astimezone(BR_TZ).date()
+                        if data_envio == hoje_br:
+                            clps_hoje.append(decodificar_assunto(msg_h.get("Subject")))
 
                 mail.logout()
 
@@ -167,10 +183,7 @@ with c1:
                         matches.sort(key=lambda x: x["date"], reverse=True)
                         p_datas = matches[0]["datas"] if matches else {"ETA":"-","ETB":"-","ETD":"-"}
                         db = ler_banco(n)
-                        
-                        eta = p_datas["ETA"] if p_datas["ETA"] != "-" else db[0]
-                        etb = p_datas["ETB"] if p_datas["ETB"] != "-" else db[1]
-                        etd = p_datas["ETD"] if p_datas["ETD"] != "-" else db[2]
+                        eta, etb, etd = p_datas["ETA"], p_datas["ETB"], p_datas["ETD"]
                         st_clp = "✅ EMITIDA" if any(n_id in c for c in clps_hoje) else db[3]
                         
                         salvar_banco(n, eta, etb, etd, st_clp)
@@ -178,7 +191,10 @@ with c1:
                             "Navio": n_id if belem else n,
                             "Prospect Manhã": "✅" if any(e["date"].hour < 13 for e in matches) else "❌",
                             "Prospect Tarde": "✅" if any(e["date"].hour >= 13 for e in matches) else "❌",
-                            "ETA": eta, "ETB": etb, "ETD": etd, "CLP": st_clp
+                            "ETA": eta if eta != "-" else db[0], 
+                            "ETB": etb if etb != "-" else db[1], 
+                            "ETD": etd if etd != "-" else db[2], 
+                            "CLP": st_clp
                         })
                     return res
 
@@ -188,7 +204,16 @@ with c1:
                 st.rerun()
         except Exception as e: st.error(f"Erro: {e}")
 
+with c2:
+    if st.button("📧 ENVIAR RELATÓRIO", use_container_width=True):
+        if st.session_state.slz:
+            if enviar_relatorio(st.session_state.slz, st.session_state.bel):
+                st.success("E-mail enviado para Leonardo!")
+            else: st.error("Erro ao enviar e-mail.")
+        else: st.warning("Primeiro clique em 'Atualizar Agora'.")
+
 if st.session_state.at != "-":
+    st.write(f"⏱️ Atualizado em: {st.session_state.at}")
     t1, t2 = st.tabs(["📍 São Luís", "📍 Belém"])
     with t1: st.table(st.session_state.slz)
     with t2: st.table(st.session_state.bel)
