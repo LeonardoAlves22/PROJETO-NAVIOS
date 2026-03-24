@@ -89,22 +89,23 @@ if 'slz' not in st.session_state: st.session_state.slz, st.session_state.bel, st
 
 if st.button("🔄 ATUALIZAR AGORA", use_container_width=True, type="primary"):
     try:
-        with st.status("Extraindo dados...", expanded=True) as status:
+        with st.status("Sincronizando...", expanded=True) as status:
             mail = imaplib.IMAP4_SSL("imap.gmail.com")
             mail.login(EMAIL_USER, EMAIL_PASS)
             agora = datetime.now(BR_TZ)
             
-            # Formatação segura da data para o Gmail (Ex: 24-Mar-2026)
-            data_imap = agora.strftime("%d-%b-%Y")
-            
             # 1. BUSCA O RELATÓRIO DO APPS SCRIPT
             mail.select("INBOX", readonly=True)
+            # Busca simples apenas pelo Assunto (sem filtros de data complexos)
             _, d_l = mail.search(None, '(SUBJECT "STATUS OPERACIONAL (SLZ & BEL)")')
+            
             navios_com_clp = {} 
             slz_list, bel_list = [], []
 
             if d_l[0]:
-                _, d = mail.fetch(d_l[0].split()[-1], '(RFC822)')
+                # Pega o último e-mail desse assunto
+                eid_lista = d_l[0].split()[-1]
+                _, d = mail.fetch(eid_lista, '(RFC822)')
                 corpo = extrair_corpo_email(email.message_from_bytes(d[0][1]))
                 secao, navio_atual = None, None
                 for linha in corpo.split('\n'):
@@ -118,21 +119,20 @@ if st.button("🔄 ATUALIZAR AGORA", use_container_width=True, type="primary"):
                     if "LIVRE PRÁTICA (CLP):" in l and navio_atual:
                         navios_com_clp[navio_atual] = linha.split(":")[-1].strip()
 
-            # 2. BUSCA PROSPECTS (Proteção contra erro de data)
+            # 2. BUSCA PROSPECTS (Pega os últimos 50 e filtra no Python)
             mail.select("PROSPECT", readonly=True)
-            try:
-                _, d_p = mail.search(None, f'SINCE {data_imap}')
-            except:
-                _, d_p = mail.search(None, 'ALL') # Se der erro de data, pega todos e filtramos no Python
-
+            _, d_p = mail.search(None, 'ALL')
+            
             prospy = []
             if d_p[0]:
-                for eid in reversed(d_p[0].split()[-50:]):
+                # Pega os últimos 50 IDs de e-mail da pasta Prospect
+                lista_ids = d_p[0].split()[-50:]
+                for eid in reversed(lista_ids):
                     _, data = mail.fetch(eid, '(BODY.PEEK[HEADER.FIELDS (Subject Date)] BODY.PEEK[TEXT])')
                     head = email.message_from_bytes(data[0][1])
                     envio = email.utils.parsedate_to_datetime(head.get("Date")).astimezone(BR_TZ)
                     
-                    # Filtro manual para garantir que é de hoje ou ontem (segurança extra)
+                    # Filtra: Somente hoje ou ontem
                     if envio.date() >= (agora.date() - timedelta(days=1)):
                         raw_subj = decode_header(head.get("Subject"))[0][0]
                         subj = (raw_subj.decode() if isinstance(raw_subj, bytes) else str(raw_subj)).upper()
@@ -159,11 +159,11 @@ if st.button("🔄 ATUALIZAR AGORA", use_container_width=True, type="primary"):
             st.session_state.bel = consolidar(bel_list)
             st.session_state.at = agora.strftime("%H:%M")
             st.rerun()
-    except Exception as e: st.error(f"Erro ao processar e-mail: {e}")
+    except Exception as e: st.error(f"Erro Crítico: {e}")
 
 # --- EXIBIÇÃO ---
 if st.session_state.at != "-":
-    st.write(f"⏱️ Última Sincronização: {st.session_state.at}")
+    st.write(f"⏱️ Sincronizado com E-mail Consolidado: {st.session_state.at}")
     t1, t2 = st.tabs(["📍 São Luís", "📍 Belém"])
     with t1: st.table(st.session_state.slz)
     with t2: st.table(st.session_state.bel)
