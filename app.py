@@ -3,11 +3,11 @@ import imaplib, email, re, smtplib, sqlite3
 from email.header import decode_header
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import pytz
 import time
 
-# 1. Configuração e Fuso
+# 1. Configuração da Página
 st.set_page_config(page_title="Monitor WS", layout="wide")
 BR_TZ = pytz.timezone('America/Sao_Paulo')
 
@@ -15,6 +15,8 @@ BR_TZ = pytz.timezone('America/Sao_Paulo')
 EMAIL_USER = "leonardo.alves@wilsonsons.com.br"
 EMAIL_PASS = "nlvr vmyv cbcq oexe"
 DESTINATARIO = "leonardo.alves@wilsonsons.com.br"
+
+REMETENTES_VALIDOS = ["operation.sluis", "operation.belem", "agencybrazil"]
 TERMOS_PROSPECT = ["PROSPECT", "ARRIVAL", "NOR TENDERED", "BERTHING", "BERTH", "DAILY"]
 
 # --- BANCO DE DADOS ---
@@ -43,9 +45,9 @@ def salvar_banco(nome_id, eta, etb, etd, clp):
         conn = sqlite3.connect('monitor_navios.db', check_same_thread=False)
         c = conn.cursor()
         ex = ler_banco(nome_id)
-        eta_f = eta if (eta != "-" and eta) else ex[0]
-        etb_f = etb if (etb != "-" and etb) else ex[1]
-        etd_f = etd if (etd != "-" and etd) else ex[2]
+        eta_f = eta if (eta != "-" and eta is not None) else ex[0]
+        etb_f = etb if (etb != "-" and etb is not None) else ex[1]
+        etd_f = etd if (etd != "-" and etd is not None) else ex[2]
         c.execute("INSERT OR REPLACE INTO navios VALUES (?,?,?,?,?,?)", 
                   (nome_id, eta_f, etb_f, etd_f, clp, datetime.now(BR_TZ).strftime("%H:%M")))
         conn.commit()
@@ -53,157 +55,241 @@ def salvar_banco(nome_id, eta, etb, etd, clp):
     except: pass
 
 # --- APOIO ---
-def decodificar_texto(payload):
-    if not payload: return ""
-    return payload.decode(errors='ignore') if isinstance(payload, bytes) else str(payload)
-
-def decodificar_assunto(subj_raw):
-    if not subj_raw: return ""
+def extrair_corpo_email(msg):
+    corpo = ""
     try:
-        decoded = decode_header(subj_raw)
-        res = ""
-        for part, enc in decoded:
-            if isinstance(part, bytes): res += part.decode(enc or 'utf-8', errors='ignore')
-            else: res += str(part)
-        return res.upper()
-    except: return str(subj_raw).upper()
+        if msg.is_multipart():
+            for parte in msg.walk():
+                if parte.get_content_type() in ['text/plain', 'text/html']:
+                    p = parte.get_payload(decode=True).decode(errors='ignore')
+                    corpo += p
+        else:
+            corpo = msg.get_payload(decode=True).decode(errors='ignore')
+    except: pass
+    return corpo
 
-def extrair_datas(texto, ano):
+def decodificar_assunto(m):
+    subj = m.get("Subject", "")
+    if not subj: return ""
+    decoded = decode_header(subj)
+    res = ""
+    for part, enc in decoded:
+        if isinstance(part, bytes): res += part.decode(enc or 'utf-8', errors='ignore')
+        else: res += str(part)
+    return res.upper()
+
+def limpar_visual_nome(n):
+    n = n.upper()
+    porto = re.search(r'(\(.*?\))', n)
+    p_str = porto.group(1) if porto else ""
+    limpo = re.sub(r'^(MV|M/V|MT|M/T)\s+', '', n)
+    limpo = limpo.split(' - ')[0].split(' (')[0].strip()
+    return f"{limpo} {p_str}".strip()
+
+def extrair_datas_prospect(corpo_sujo, envio):
     res = {"ETA": "-", "ETB": "-", "ETD": "-"}
-    meses = {'JAN':1,'FEB':2,'MAR':3,'APR':4,'MAY':5,'JUN':6,'JUL':7,'AUG':8,'SEP':9,'OCT':10,'NOV':11,'DEC':12}
-    txt = " ".join(texto.upper().split())
-    def fmt(s):
-        m_m = re.search(r'(JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)', s)
-        m_d = re.search(r'(\d{1,2})', s)
-        return f"{int(m_d.group(1)):02d}/{meses[m_m.group(1)]:02d}/{ano}" if m_m and m_d else "-"
-    m_eta = re.search(r"(NOTICE OF READINESS|ARRIVAL AT ROADS|ETA)\s*[:\-]?\s*([A-Z]{3,}\s+\d{1,2})", txt)
-    if m_eta: res["ETA"] = fmt(m_eta.group(2))
+    txt = re.sub(r'<[^>]+>', ' ', corpo_sujo).upper()
+    txt = " ".join(txt.split())
+    meses_map = {'JAN':1,'FEB':2,'MAR':3,'APR':4,'MAY':5,'JUN':6,'JUL':7,'AUG':8,'SEP':9,'OCT':10,'NOV':11,'DEC':12}
+    hoje = datetime.now(BR_TZ).replace(hour=0, minute=0, second=0, microsecond=0)
+    
+    def parse_data(s):
+        m_mes = re.search(r'(JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)', s)
+        m_dia = re.search(r'(\d{1,2})', s)
+        if m_mes and m_dia:
+            dia, mes = int(m_dia.group(1)), meses_map[m_mes.group(1)]
+            dt_encontrada = datetime(envio.year, mes, dia, tzinfo=BR_TZ)
+            if dt_encontrada < (hoje - timedelta(days=15)):
+                return "-"
+            return f"{dia:02d}/{mes:02d}/{envio.year}"
+        return "-"
+
+    termos_eta = [
+        r"NOTICE OF READINESS\s*[:\-]?\s*([A-Z]{3,}\s+\d{1,2})",
+        r"ARRIVAL AT ROADS\s*[:\-]?\s*([A-Z]{3,}\s+\d{1,2})",
+        r"ETA AT MOSQUEIRO\s*[:\-]?\s*([A-Z]{3,}\s+\d{1,2})",
+        r"ETA AT VILA\s*[:\-]?\s*([A-Z]{3,}\s+\d{1,2})",
+        r"ETA\s*[:\-]?\s*([A-Z]{3,}\s+\d{1,2})"
+    ]
+    
+    for t in termos_eta:
+        m = re.search(t, txt)
+        if m:
+            val = parse_data(m.group(1))
+            if val != "-":
+                res["ETA"] = val
+                break
+
     for k in ["ETB", "ETD", "ETS"]:
         m = re.search(rf"{k}\s*[:\-]?\s*([A-Z]{{3,}}\s+\d{{1,2}})", txt)
-        if m: res["ETD" if k=="ETS" else k] = fmt(m.group(1))
+        if m:
+            dt = parse_data(m.group(1))
+            if dt != "-": res["ETD" if k=="ETS" else k] = dt
     return res
+
+def enviar_relatorio(dados_slz, dados_bel):
+    try:
+        msg = MIMEMultipart()
+        msg['From'] = EMAIL_USER
+        msg['To'] = DESTINATARIO
+        msg['Subject'] = f"🚢 Monitor Operacional WS - {datetime.now(BR_TZ).strftime('%d/%m %H:%M')}"
+        
+        def gerar_html(titulo, lista):
+            h = f"<h3 style='font-family:Arial; background:#f2f2f2; padding:8px;'>{titulo}</h3>"
+            h += "<table border='1' style='border-collapse:collapse; width:100%; font-family:Arial; font-size:12px;'>"
+            h += "<tr style='background:#004a99; color:white;'><th>Navio</th><th>Prospect Manhã</th><th>Prospect Tarde</th><th>ETA</th><th>ETB</th><th>ETD</th><th>CLP</th></tr>"
+            for r in lista:
+                c_am = "background:#d4edda;" if r["Prospect Manhã"] == "✅" else "background:#f8d7da;"
+                c_pm = "background:#d4edda;" if r["Prospect Tarde"] == "✅" else "background:#f8d7da;"
+                bg_clp = "#d4edda" if "EMITIDA" in r['CLP'] else ("#fff3cd" if "CRÍTICO" in r['CLP'] else "#f8d7da")
+                h += f"<tr style='text-align:center;'><td>{r['Navio']}</td><td style='{c_am}'>{r['Prospect Manhã']}</td><td style='{c_pm}'>{r['Prospect Tarde']}</td><td>{r['ETA']}</td><td>{r['ETB']}</td><td>{r['ETD']}</td><td style='background:{bg_clp};'>{r['CLP']}</td></tr>"
+            return h + "</table><br>"
+
+        corpo = f"<html><body>{gerar_html('📍 São Luís', dados_slz)}{gerar_html('📍 Belém', dados_bel)}</body></html>"
+        msg.attach(MIMEText(corpo, 'html'))
+        s = smtplib.SMTP('smtp.gmail.com', 587); s.starttls(); s.login(EMAIL_USER, EMAIL_PASS); s.send_message(msg); s.quit()
+        return True
+    except: return False
 
 # --- INTERFACE ---
 st.title("🚢 Monitor Operacional Wilson Sons")
 init_db()
 
-if 'slz' not in st.session_state: 
-    st.session_state.slz, st.session_state.bel, st.session_state.at = [], [], "-"
+if 'slz' not in st.session_state: st.session_state.slz = []
+if 'bel' not in st.session_state: st.session_state.bel = []
+if 'at' not in st.session_state: st.session_state.at = "-"
 
 c1, c2 = st.columns(2)
 with c1:
     if st.button("🔄 ATUALIZAR AGORA", use_container_width=True, type="primary"):
         try:
-            progress_bar = st.progress(0)
-            status_text = st.empty()
-            
-            with st.status("🚀 Iniciando Sincronização...", expanded=True) as status:
-                # ETAPA 1: Conexão
-                status_text.text("Conectando ao Gmail...")
+            # Inicializa Barra de Progresso
+            progresso = st.progress(0)
+            status_msg = st.empty()
+
+            with st.status("Iniciando Sincronização...", expanded=True) as status:
+                
+                status_msg.info("Conectando ao Gmail...")
                 mail = imaplib.IMAP4_SSL("imap.gmail.com")
                 mail.login(EMAIL_USER, EMAIL_PASS)
-                hoje_br = datetime.now(BR_TZ).date()
-                progress_bar.progress(10)
+                agora = datetime.now(BR_TZ)
+                progresso.progress(10)
 
-                # ETAPA 2: Lista Navios (INBOX)
-                status_text.text("Buscando Lista de Navios (Inbox)...")
+                # 1. LISTA NAVIOS
+                status_msg.info("Buscando 'LISTA NAVIOS' no Inbox...")
                 mail.select("INBOX", readonly=True)
-                _, ids_l = mail.search(None, 'SUBJECT', '"LISTA NAVIOS"')
+                _, d_l = mail.search(None, '(SUBJECT "LISTA NAVIOS")')
                 slz_raw, bel_raw = [], []
-                if ids_l[0]:
-                    last_id = ids_l[0].split()[-1]
-                    _, d = mail.fetch(last_id, '(BODY.PEEK[TEXT])')
-                    corpo = decodificar_texto(d[0][1])
-                    secao, vistos = None, set()
-                    for linha in corpo.split('\n'):
-                        l = linha.strip()
-                        if "SLZ" in l.upper(): secao = "SLZ"; continue
-                        if "BELEM" in l.upper(): secao = "BEL"; continue
-                        if secao and len(l) > 3 and l.upper() not in vistos:
-                            if secao == "SLZ": slz_raw.append(l)
-                            else: bel_raw.append(l)
-                            vistos.add(l.upper())
-                progress_bar.progress(30)
+                if d_l[0]:
+                    _, d = mail.fetch(d_l[0].split()[-1], '(RFC822)')
+                    corpo_lista = extrair_corpo_email(email.message_from_bytes(d[0][1]))
+                    linhas = [l.strip() for l in corpo_lista.split('\n') if len(l.strip()) > 1]
+                    secao = None
+                    for linha in linhas:
+                        l_upper = linha.upper()
+                        if "SLZ" in l_upper: secao = "SLZ"; continue
+                        if "BELEM" in l_upper: secao = "BEL"; continue
+                        if secao == "SLZ" and len(linha) > 3: slz_raw.append(linha)
+                        elif secao == "BEL" and len(linha) > 3: bel_raw.append(linha)
+                progresso.progress(25)
 
-                # ETAPA 3: Prospects (Bulk Fetch)
-                status_text.text("Lendo Marcador PROSPECT...")
+                # 2. PROSPECTS
+                status_msg.info("Buscando Prospects de hoje...")
                 mail.select("PROSPECT", readonly=True)
-                _, msg_count = mail.select("PROSPECT", readonly=True)
-                total_p = int(msg_count[0])
+                _, d_p = mail.search(None, f'(SINCE "{(agora - timedelta(days=1)).strftime("%d-%b-%Y")}")')
                 prospy = []
-                if total_p > 0:
-                    start_p = max(1, total_p - 40) # Pega os últimos 40 direto pelo ID
-                    ids_p = ",".join(map(str, range(start_p, total_p + 1)))
-                    _, data_p = mail.fetch(ids_p, '(BODY.PEEK[HEADER.FIELDS (Subject Date)] BODY.PEEK[TEXT])')
-                    
-                    for i in range(0, len(data_p), 2):
-                        if isinstance(data_p[i], tuple):
-                            head = email.message_from_bytes(data_p[i][1])
-                            body = decodificar_texto(data_p[i+1][1])
-                            envio = email.utils.parsedate_to_datetime(head.get("Date")).astimezone(BR_TZ)
-                            if envio.date() == hoje_br:
-                                subj = decodificar_assunto(head.get("Subject"))
-                                if any(t in subj for t in TERMOS_PROSPECT):
-                                    prospy.append({"subj": subj, "date": envio, "datas": extrair_datas(body, envio.year)})
-                progress_bar.progress(60)
+                if d_p[0]:
+                    lista_ids = d_p[0].split()[-150:]
+                    total_p = len(lista_ids)
+                    for i, eid in enumerate(lista_ids):
+                        # Atualiza progresso fino aqui
+                        p_atual = 25 + int((i / total_p) * 40)
+                        progresso.progress(p_atual)
+                        status_msg.info(f"Processando Prospect {i+1} de {total_p}...")
+                        
+                        _, d = mail.fetch(eid, '(RFC822)')
+                        m = email.message_from_bytes(d[0][1])
+                        subj = decodificar_assunto(m)
+                        if any(term in subj for term in TERMOS_PROSPECT):
+                            envio = email.utils.parsedate_to_datetime(m.get("Date")).astimezone(BR_TZ)
+                            prospy.append({"subj": subj, "date": envio, "datas": extrair_datas_prospect(extrair_corpo_email(m), envio)})
+                progresso.progress(65)
 
-                # ETAPA 4: CLP (Bulk Fetch)
-                status_text.text("Lendo Marcador CLP...")
+                # 3. CLP
+                status_msg.info("Verificando Marcador CLP...")
                 mail.select("CLP", readonly=True)
-                _, msg_count_c = mail.select("CLP", readonly=True)
-                total_c = int(msg_count_c[0])
-                clps_hoje = []
-                if total_c > 0:
-                    start_c = max(1, total_c - 30)
-                    ids_c = ",".join(map(str, range(start_c, total_c + 1)))
-                    _, data_c = mail.fetch(ids_c, '(BODY.PEEK[HEADER.FIELDS (Subject Date)])')
-                    for item in data_c:
-                        if isinstance(item, tuple):
-                            m_c = email.message_from_bytes(item[1])
-                            env_c = email.utils.parsedate_to_datetime(m_c.get("Date")).astimezone(BR_TZ).date()
-                            if env_c == hoje_br:
-                                clps_hoje.append(decodificar_assunto(m_c.get("Subject")))
-                progress_bar.progress(85)
-
-                # ETAPA 5: Processamento
-                status_text.text("Finalizando cálculos...")
+                _, d_c = mail.search(None, "ALL")
+                clps_list = []
+                if d_c[0]:
+                    lista_ids_c = d_c[0].split()[-60:]
+                    total_c = len(lista_ids_c)
+                    for i, e in enumerate(lista_ids_c):
+                        p_atual = 65 + int((i / total_c) * 20)
+                        progresso.progress(p_atual)
+                        status_msg.info(f"Checando CLP {i+1} de {total_c}...")
+                        
+                        _, d = mail.fetch(e, '(BODY[HEADER.FIELDS (SUBJECT)])')
+                        clps_list.append(decodificar_assunto(email.message_from_bytes(d[0][1])))
+                
                 mail.logout()
+                progresso.progress(85)
 
+                # 4. PROCESSAMENTO FINAL
+                status_msg.info("Calculando Status e Atualizando Banco...")
                 def processar(lista, belem=False):
                     res = []
                     for n in lista:
-                        n_id = re.sub(r'^(MV|M/V|MT|M/T)\s+', '', n.upper()).split(' - ')[0].strip()
+                        n_id = re.sub(r'^(MV|M/V|MT|M/T)\s+', '', n.upper()).split(' - ')[0].split(' (')[0].strip()
                         matches = [e for e in prospy if n_id in e["subj"]]
                         matches.sort(key=lambda x: x["date"], reverse=True)
+                        
                         p_datas = matches[0]["datas"] if matches else {"ETA":"-","ETB":"-","ETD":"-"}
                         db = ler_banco(n)
+                        
                         eta = p_datas["ETA"] if p_datas["ETA"] != "-" else db[0]
                         etb = p_datas["ETB"] if p_datas["ETB"] != "-" else db[1]
                         etd = p_datas["ETD"] if p_datas["ETD"] != "-" else db[2]
-                        st_clp = "✅ EMITIDA" if any(n_id in c for c in clps_hoje) else db[3]
                         
-                        if st_clp != "✅ EMITIDA" and eta != "-":
+                        tem_clp = any(n_id in s for s in clps_list)
+                        if tem_clp:
+                            st_clp = "✅ EMITIDA"
+                        elif eta != "-" and "/" in eta:
                             try:
-                                d,m,a = eta.split("/"); diff = (datetime(int(a),int(m),int(d)).date() - hoje_br).days
-                                if diff <= 4: st_clp = "⚠️ CRÍTICO"
-                            except: pass
+                                d, m, a = eta.split("/")
+                                data_eta = datetime(int(a), int(m), int(d), tzinfo=BR_TZ).replace(hour=0, minute=0, second=0, microsecond=0)
+                                data_hoje = agora.replace(hour=0, minute=0, second=0, microsecond=0)
+                                diff = (data_eta - data_hoje).days
+                                st_clp = "⚠️ CRÍTICO" if diff <= 4 else "❌ PENDENTE"
+                            except:
+                                st_clp = "❌ PENDENTE"
+                        else:
+                            st_clp = "❌ PENDENTE"
                         
                         salvar_banco(n, eta, etb, etd, st_clp)
-                        res.append({"Navio": n_id if belem else n, "Prospect Manhã": "✅" if any(e["date"].hour < 13 for e in matches) else "❌", "Prospect Tarde": "✅" if any(e["date"].hour >= 13 for e in matches) else "❌", "ETA": eta, "ETB": etb, "ETD": etd, "CLP": st_clp})
+                        today_m = [e for e in matches if e["date"].date() == agora.date()]
+                        res.append({"Navio": limpar_visual_nome(n) if belem else n, "Prospect Manhã": "✅" if any(e["date"].hour < 13 for e in today_m) else "❌", "Prospect Tarde": "✅" if any(e["date"].hour >= 13 for e in today_m) else "❌", "ETA": eta, "ETB": etb, "ETD": etd, "CLP": st_clp})
                     return res
 
                 st.session_state.slz = processar(slz_raw, False)
                 st.session_state.bel = processar(bel_raw, True)
-                st.session_state.at = datetime.now(BR_TZ).strftime("%H:%M")
+                st.session_state.at = agora.strftime("%H:%M")
                 
-                progress_bar.progress(100)
-                status_text.text("Concluído!")
+                progresso.progress(100)
+                status_msg.success("Sincronização Finalizada!")
                 time.sleep(1)
                 st.rerun()
-        except Exception as e: st.error(f"Erro: {e}")
+
+        except Exception as e: 
+            st.error(f"Erro: {e}")
+            progresso.empty()
+
+with c2:
+    if st.button("📧 ENVIAR POR E-MAIL", use_container_width=True):
+        if st.session_state.slz or st.session_state.bel:
+            if enviar_relatorio(st.session_state.slz, st.session_state.bel):
+                st.success("Relatório enviado!")
 
 if st.session_state.at != "-":
-    st.write(f"⏱️ Atualizado em: {st.session_state.at}")
     t1, t2 = st.tabs(["📍 São Luís", "📍 Belém"])
     with t1: st.table(st.session_state.slz)
     with t2: st.table(st.session_state.bel)
