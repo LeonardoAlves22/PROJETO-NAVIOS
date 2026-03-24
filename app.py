@@ -13,7 +13,7 @@ BR_TZ = pytz.timezone('America/Sao_Paulo')
 # --- CONFIGURAÇÕES ---
 EMAIL_USER = "leonardo.alves@wilsonsons.com.br"
 EMAIL_PASS = "nlvr vmyv cbcq oexe"
-DESTINATARIO = "leonardo.alves@wilsonsons.com.br"
+DESTINATARIO = "leonardo.alves@wilsonsons.com.br,operation.sluis@wilsonsons.com.br,operation.belem@wilsonsons.com.br"
 
 REMETENTES_VALIDOS = ["operation.sluis", "operation.belem", "agencybrazil"]
 TERMOS_PROSPECT = ["PROSPECT", "ARRIVAL", "NOR TENDERED", "BERTHING", "BERTH", "DAILY"]
