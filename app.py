@@ -78,12 +78,10 @@ def extrair_datas_prospect(texto_puro, envio):
         if m_mes and m_dia:
             return f"{int(m_dia.group(1)):02d}/{meses_map[m_mes.group(1)]:02d}/{envio.year}"
         return "-"
-    m_eta = re.search(r"ETA\s*[:\-]?\s*([A-Z]{3,}\s+\d{1,2})", txt)
-    if m_eta: res["ETA"] = parse_data(m_eta.group(1))
-    m_etb = re.search(r"ETB\s*[:\-]?\s*([A-Z]{3,}\s+\d{1,2})", txt)
-    if m_etb: res["ETB"] = parse_data(m_etb.group(1))
-    m_etd = re.search(r"ETD\s*[:\-]?\s*([A-Z]{3,}\s+\d{1,2})", txt)
-    if m_etd: res["ETD"] = parse_data(m_etd.group(1))
+    # Busca simplificada e direta
+    for k in ["ETA", "ETB", "ETD"]:
+        m = re.search(rf"{k}\s*[:\-]?\s*([A-Z]{{3,}}\s+\d{{1,2}})", txt)
+        if m: res[k] = parse_data(m.group(1))
     return res
 
 def enviar_relatorio(dados_slz, dados_bel):
@@ -119,12 +117,15 @@ with c1:
                 mail = imaplib.IMAP4_SSL("imap.gmail.com")
                 mail.login(EMAIL_USER, EMAIL_PASS)
                 hoje_br = datetime.now(BR_TZ)
-                # Formato IMAP obrigatório: DD-Mon-YYYY (Ex: 23-Mar-2026)
+                
+                # CORREÇÃO DO ERRO: Formato estrito para o IMAP SINCE
+                # Exemplo gerado: 23-Mar-2026
                 data_imap = hoje_br.strftime("%d-%b-%Y") 
 
-                # 1. LISTA NAVIOS
+                # 1. LISTA NAVIOS (INBOX)
                 mail.select("INBOX", readonly=True)
-                _, d_l = mail.search(None, f'SINCE {data_imap} SUBJECT "LISTA NAVIOS"')
+                # O comando search deve ser uma string simples para o SINCE
+                _, d_l = mail.search(None, 'SINCE', data_imap, 'SUBJECT', '"LISTA NAVIOS"')
                 slz_raw, bel_raw = [], []
                 if d_l[0]:
                     _, d = mail.fetch(d_l[0].split()[-1], '(BODY.PEEK[TEXT])')
@@ -141,13 +142,15 @@ with c1:
 
                 # 2. PROSPECTS
                 mail.select("PROSPECT", readonly=True)
-                _, d_p = mail.search(None, f'SINCE {data_imap}')
+                _, d_p = mail.search(None, 'SINCE', data_imap)
                 prospy = []
                 if d_p[0]:
                     for eid in d_p[0].split():
                         _, d = mail.fetch(eid, '(BODY.PEEK[HEADER.FIELDS (Subject Date)] BODY.PEEK[TEXT])')
                         m_head = email.message_from_bytes(d[0][1])
                         envio = email.utils.parsedate_to_datetime(m_head.get("Date")).astimezone(BR_TZ)
+                        
+                        # Filtro extra no Python para garantir que seja hoje (GMT-3)
                         if envio.date() == hoje_br.date():
                             subj = decodificar_assunto(m_head.get("Subject"))
                             if any(t in subj for t in TERMOS_PROSPECT):
@@ -156,8 +159,12 @@ with c1:
 
                 # 3. CLP
                 mail.select("CLP", readonly=True)
-                _, d_c = mail.search(None, f'SINCE {data_imap}')
-                clps_hoje = [decodificar_assunto(email.message_from_bytes(mail.fetch(e, '(BODY.PEEK[HEADER.FIELDS (SUBJECT)])')[1][0][1]).get("Subject")) for e in d_c[0].split()] if d_c[0] else []
+                _, d_c = mail.search(None, 'SINCE', data_imap)
+                clps_hoje = []
+                if d_c[0]:
+                    for e in d_c[0].split():
+                        _, d = mail.fetch(e, '(BODY.PEEK[HEADER.FIELDS (SUBJECT)])')
+                        clps_hoje.append(decodificar_assunto(email.message_from_bytes(d[0][1]).get("Subject")))
 
                 def processar(lista, is_belem=False):
                     res = []
@@ -167,10 +174,13 @@ with c1:
                         matches.sort(key=lambda x: x["date"], reverse=True)
                         p_datas = matches[0]["datas"] if matches else {"ETA":"-","ETB":"-","ETD":"-"}
                         db = ler_banco(n)
+                        
+                        # Se não achou no e-mail de hoje, tenta manter o que já existia no banco
                         eta = p_datas["ETA"] if p_datas["ETA"] != "-" else db[0]
                         etb = p_datas["ETB"] if p_datas["ETB"] != "-" else db[1]
                         etd = p_datas["ETD"] if p_datas["ETD"] != "-" else db[2]
                         st_clp = "✅ EMITIDA" if any(n_id in c for c in clps_hoje) else db[3]
+                        
                         salvar_banco(n, eta, etb, etd, st_clp)
                         res.append({
                             "Navio": n_id if is_belem else n,
@@ -184,13 +194,13 @@ with c1:
                 st.session_state.bel = processar(bel_raw, True)
                 st.session_state.at = hoje_br.strftime("%H:%M")
                 mail.logout(); st.rerun()
-        except Exception as e: st.error(f"Erro: {e}")
+        except Exception as e: st.error(f"Erro técnico: {e}")
 
 with c2:
     if st.button("📧 ENVIAR POR E-MAIL", use_container_width=True):
         if st.session_state.slz:
             if enviar_relatorio(st.session_state.slz, st.session_state.bel): st.success("Relatório enviado!")
-        else: st.warning("Atualize antes de enviar.")
+        else: st.warning("Atualize os dados primeiro.")
 
 if st.session_state.at != "-":
     st.write(f"⏱️ Última atualização: {st.session_state.at}")
